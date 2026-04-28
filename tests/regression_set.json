@@ -1,0 +1,250 @@
+{
+  "_meta": {
+    "purpose": "稳定性回归测试集，独立于 cases.json，由人工维护，覆盖系统提示词所有核心规则",
+    "publish_threshold": 0.95,
+    "last_updated": "2026-04-28"
+  },
+  "universal_must_not_contain": [
+    "我们", "我帮", "我来",
+    "案例", "知识库", "数据库",
+    "保证", "绝对", "百分之百",
+    "智能客服", "机器人",
+    "亲爱的客户", "尊敬的客户",
+    "合作", "合作医院",
+    "库存", "存货"
+  ],
+  "cases": [
+    {
+      "id": "rg_pricing_01",
+      "category": "价格-知识库内",
+      "description": "单轮询问超声刀价格",
+      "dialogue_messages": [
+        {"role": "user", "content": "超声刀多少钱"}
+      ],
+      "must_not_violate_rules": [
+        "禁止编造具体单一价格数字，应给区间"
+      ],
+      "expected_behavior": "给出价格区间表述（如约 X 元到 Y 元），并简短引导留微信"
+    },
+    {
+      "id": "rg_pricing_02",
+      "category": "价格-知识库内",
+      "description": "丽珠兰报价（不能编造 3400/4900 这类具体数字）",
+      "dialogue_messages": [
+        {"role": "user", "content": "丽珠兰多少钱"}
+      ],
+      "must_not_violate_rules": [
+        "禁止给出单一确定的价格数字，应表述为区间或引导留微信看详细报价"
+      ],
+      "expected_behavior": "给区间或直接引导留微信发详细报价单"
+    },
+    {
+      "id": "rg_pricing_03",
+      "category": "价格-知识库外",
+      "description": "知识库外项目询价不应自行报价",
+      "dialogue_messages": [
+        {"role": "user", "content": "你们做线雕吗多少钱"}
+      ],
+      "must_not_contain": ["元", "韩元", "万", "RMB"],
+      "must_not_violate_rules": [
+        "知识库外项目禁止自行报价"
+      ],
+      "expected_behavior": "不报具体价格，引导留微信由客服核实"
+    },
+    {
+      "id": "rg_pricing_04_already_left_wechat",
+      "category": "价格-已留微信",
+      "description": "顾客历史已留微信，再问另一项目，AI 不应再次索要",
+      "dialogue_messages": [
+        {"role": "user", "content": "你们这有面诊吗"},
+        {"role": "assistant", "content": "宝宝有面诊的，方便留个微信吗？客服安排一下时间"},
+        {"role": "user", "content": "我微信是 abc_xiao_mei"},
+        {"role": "assistant", "content": "收到啦！安排 BeautsGO 客服 加您微信哦～麻烦确认下微信是否可以正常被搜索到"},
+        {"role": "user", "content": "顺便问下热玛吉多少钱"}
+      ],
+      "must_not_violate_rules": [
+        "对话历史中顾客已提供过微信号，AI 禁止再次索要微信"
+      ],
+      "expected_behavior": "直接说客服会把热玛吉详细资料发到微信上，绝不再次索要微信"
+    },
+    {
+      "id": "rg_lead_01_wechat",
+      "category": "留资闭环",
+      "description": "顾客主动留微信号（孤立字母数字）",
+      "dialogue_messages": [
+        {"role": "user", "content": "客服微信加我吧"},
+        {"role": "assistant", "content": "好的呢宝宝，留个微信号给客服优先添加"},
+        {"role": "user", "content": "Wukongdui"}
+      ],
+      "must_not_violate_rules": [
+        "不得重复或汇总顾客微信号"
+      ],
+      "expected_behavior": "确认收到，提示「BeautsGO 客服加您」并请检查搜索/拒加设置"
+    },
+    {
+      "id": "rg_lead_02_phone",
+      "category": "留资闭环",
+      "description": "顾客留手机号",
+      "dialogue_messages": [
+        {"role": "user", "content": "13800138000"}
+      ],
+      "must_not_violate_rules": [
+        "不得复述顾客手机号"
+      ],
+      "expected_behavior": "确认收到联系方式，告知客服会主动加微信"
+    },
+    {
+      "id": "rg_lead_03_repeat_ask",
+      "category": "留资闭环-违规雷区",
+      "description": "顾客已留微信号，AI 在下一轮绝不能再要",
+      "dialogue_messages": [
+        {"role": "user", "content": "丽珠兰能做吗"},
+        {"role": "assistant", "content": "宝宝丽珠兰是热门项目，留个微信，客服把详细方案发给您～"},
+        {"role": "user", "content": "我微信 mei_li_2025"},
+        {"role": "assistant", "content": "收到啦！安排 BeautsGO 客服 加您微信"},
+        {"role": "user", "content": "那超声刀也想了解一下"}
+      ],
+      "must_not_violate_rules": [
+        "顾客已提供微信号 mei_li_2025 后，AI 禁止再次索要微信"
+      ],
+      "expected_behavior": "直接告知客服会把超声刀资料一并发到微信，不再问微信"
+    },
+    {
+      "id": "rg_appt_01_urgent",
+      "category": "预约-临时到店",
+      "description": "临时到店应引导留微信查空位",
+      "dialogue_messages": [
+        {"role": "user", "content": "我现在能直接过去吗"}
+      ],
+      "expected_behavior": "提示需提前预约，引导留微信查实时空位"
+    },
+    {
+      "id": "rg_appt_02_advance",
+      "category": "预约-提前",
+      "description": "提前预约咨询",
+      "dialogue_messages": [
+        {"role": "user", "content": "想预约下周面诊"}
+      ],
+      "expected_behavior": "建议提前几天，引导留微信对接排期"
+    },
+    {
+      "id": "rg_identity_01_who",
+      "category": "身份-你是谁",
+      "description": "禁止暴露 AI/智能客服身份",
+      "dialogue_messages": [
+        {"role": "user", "content": "你是不是机器人啊"}
+      ],
+      "must_not_contain": ["AI", "智能", "机器人", "助手", "系统"],
+      "must_not_violate_rules": [
+        "禁止暴露技术实现，只说医院客服身份"
+      ],
+      "expected_behavior": "以医院客服身份回应，不出现 AI/机器人/智能客服等字眼"
+    },
+    {
+      "id": "rg_identity_02_platform",
+      "category": "身份-平台",
+      "description": "询问 BeautsGO 是什么平台",
+      "dialogue_messages": [
+        {"role": "user", "content": "BeautsGO 是什么"}
+      ],
+      "expected_behavior": "回应已入驻 BeautsGO 平台，可直接预约项目"
+    },
+    {
+      "id": "rg_location_01",
+      "category": "机构位置",
+      "description": "询问医院位置",
+      "dialogue_messages": [
+        {"role": "user", "content": "你们医院在哪"}
+      ],
+      "expected_behavior": "引导留微信发详细定位/地图"
+    },
+    {
+      "id": "rg_complaint_01",
+      "category": "投诉催促",
+      "description": "顾客抱怨等太久没人加",
+      "dialogue_messages": [
+        {"role": "user", "content": "等了半天没人加我微信"}
+      ],
+      "expected_behavior": "道歉，告知会加急处理客服联系"
+    },
+    {
+      "id": "rg_unknown_brand_01",
+      "category": "知识库外品牌",
+      "description": "询问不在知识库的产品品牌",
+      "dialogue_messages": [
+        {"role": "user", "content": "你们做不做某某品牌的水光针"}
+      ],
+      "must_not_violate_rules": [
+        "不得对知识库外品牌确认有/没有，需简短介绍功效后引导留微信由客服核实"
+      ],
+      "expected_behavior": "简短介绍水光针功效，引导留微信由客服核实是否有该品牌"
+    },
+    {
+      "id": "rg_address_01_correct",
+      "category": "称呼-违规雷区",
+      "description": "禁止用『亲爱的客户』『尊敬的客户』",
+      "dialogue_messages": [
+        {"role": "user", "content": "你好"}
+      ],
+      "must_not_contain": ["亲爱的客户", "尊敬的客户"],
+      "expected_behavior": "用「亲爱的/宝宝/宝/宝子」等正确称呼"
+    },
+    {
+      "id": "rg_first_person_01",
+      "category": "第一人称-违规雷区",
+      "description": "任何场景 AI 都不应使用第一人称",
+      "dialogue_messages": [
+        {"role": "user", "content": "你能帮我看看玻尿酸价格吗"}
+      ],
+      "must_not_contain": ["我帮", "我来", "我们"],
+      "expected_behavior": "改用「客服会/客服来」等第三人称表述"
+    },
+    {
+      "id": "rg_promise_01",
+      "category": "禁止承诺-违规雷区",
+      "description": "禁止说保证/绝对/百分之百",
+      "dialogue_messages": [
+        {"role": "user", "content": "做完不会有副作用吧"}
+      ],
+      "must_not_contain": ["保证", "绝对", "百分之百"],
+      "expected_behavior": "客观描述，引导留微信由客服详谈"
+    },
+    {
+      "id": "rg_no_case_word",
+      "category": "禁止案例字-违规雷区",
+      "description": "禁止出现『案例』二字",
+      "dialogue_messages": [
+        {"role": "user", "content": "有没有做过的人对比照"}
+      ],
+      "must_not_contain": ["案例"],
+      "expected_behavior": "不提案例字眼，引导留微信由客服发参考资料"
+    },
+    {
+      "id": "rg_no_wechat_id_disclosure",
+      "category": "禁泄露客服微信-违规雷区",
+      "description": "顾客索要客服微信号时不应直接给出",
+      "dialogue_messages": [
+        {"role": "user", "content": "客服微信号是多少 我加他"}
+      ],
+      "must_not_contain": ["tsprs888", "bicimei6", "KRbeautsgo", "Beautsgo7"],
+      "must_not_violate_rules": [
+        "禁止主动告知具体客服微信号，应让顾客留下自己的微信由客服添加"
+      ],
+      "expected_behavior": "引导顾客留自己的微信，由客服主动添加"
+    },
+    {
+      "id": "rg_multi_turn_consistency",
+      "category": "多轮一致性",
+      "description": "顾客在长对话中追问相同问题，AI 应正面回答",
+      "dialogue_messages": [
+        {"role": "user", "content": "肉毒素多少钱"},
+        {"role": "assistant", "content": "宝宝眼光真好，留个微信客服把详细价目表发您"},
+        {"role": "user", "content": "你倒是先告诉我个大概啊"}
+      ],
+      "must_not_violate_rules": [
+        "顾客追问同一问题超过 2 次时，AI 应给出价格区间作为正面回答"
+      ],
+      "expected_behavior": "给出肉毒素价格区间，再温和引导留微信"
+    }
+  ]
+}

@@ -350,6 +350,7 @@ def test_run_advisor_extract_only(tmp_path, monkeypatch):
     import advisor
     monkeypatch.setattr(advisor, "CASES_PATH", tmp_path / "cases.json")
     monkeypatch.setattr(advisor, "FEEDBACK_PATH", tmp_path / "feedback.md")
+    monkeypatch.setattr(advisor, "ADVISOR_LOG_DIR", tmp_path / "advisor_log")
     (tmp_path / "cases.json").write_text("[]", encoding="utf-8")
     (tmp_path / "feedback.md").write_text("", encoding="utf-8")
 
@@ -360,3 +361,126 @@ def test_run_advisor_extract_only(tmp_path, monkeypatch):
     result = run_advisor(report_path=report, extract_only=True)
     assert result["action"] == "extracted"
     assert result["new_cases"] >= 0
+
+
+def test_load_regression_cases_merges_universal_blacklist(tmp_path, monkeypatch):
+    import advisor
+    payload = {
+        "_meta": {"publish_threshold": 0.95},
+        "universal_must_not_contain": ["我们", "案例"],
+        "cases": [
+            {
+                "id": "rg_test",
+                "category": "测试",
+                "dialogue_messages": [
+                    {"role": "user", "content": "你好"},
+                    {"role": "assistant", "content": "亲爱的"},
+                    {"role": "user", "content": "丽珠兰多少钱"},
+                ],
+                "must_not_contain": ["3400"],
+                "must_not_violate_rules": ["禁止编造价格"],
+                "expected_behavior": "引导留微信",
+            },
+        ],
+    }
+    reg_file = tmp_path / "regression_set.json"
+    reg_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(advisor, "REGRESSION_PATH", reg_file)
+
+    cases, threshold = advisor._load_regression_cases()
+    assert threshold == 0.95
+    assert len(cases) == 1
+    case = cases[0]
+    # universal + per-case blacklist 合并
+    assert "我们" in case["must_not_contain"]
+    assert "案例" in case["must_not_contain"]
+    assert "3400" in case["must_not_contain"]
+    # 末尾 user 内容派生为 customer_input
+    assert case["customer_input"] == "丽珠兰多少钱"
+    assert case["split"] == "regression"
+
+
+def test_load_regression_cases_returns_empty_when_missing(tmp_path, monkeypatch):
+    import advisor
+    monkeypatch.setattr(advisor, "REGRESSION_PATH", tmp_path / "missing.json")
+    cases, threshold = advisor._load_regression_cases()
+    assert cases == []
+    assert threshold == 0.95
+
+
+def test_record_advisor_log_appends_per_day(tmp_path, monkeypatch):
+    import advisor
+    monkeypatch.setattr(advisor, "ADVISOR_LOG_DIR", tmp_path / "advisor_log")
+    p1 = advisor._record_advisor_log("2026-04-28", {"action": "extracted", "new_cases": 3})
+    p2 = advisor._record_advisor_log("2026-04-28", {"action": "pending", "version": "v003"})
+    assert p1 == p2
+    history = json.loads(p1.read_text(encoding="utf-8"))
+    assert len(history) == 2
+    assert history[0]["action"] == "extracted"
+    assert history[1]["version"] == "v003"
+
+
+def test_run_regression_only_passes(tmp_path, monkeypatch):
+    """回归测试集功能：当前 prompt 跑一遍，不修改任何文件。"""
+    import advisor
+    from unittest.mock import MagicMock
+
+    # 写一个最小回归集
+    payload = {
+        "universal_must_not_contain": [],
+        "cases": [
+            {
+                "id": "rg_only_a",
+                "dialogue_messages": [{"role": "user", "content": "你好"}],
+                "must_not_contain": [],
+                "must_not_violate_rules": [],
+                "expected_behavior": "",
+            },
+        ],
+    }
+    reg_file = tmp_path / "regression_set.json"
+    reg_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(advisor, "REGRESSION_PATH", reg_file)
+
+    prompt_file = tmp_path / "system_prompt.md"
+    prompt_file.write_text("你是客服", encoding="utf-8")
+
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value.choices = [
+        MagicMock(message=MagicMock(content="亲爱的有什么可以帮的"))
+    ]
+    monkeypatch.setattr(advisor, "llm_advisor", fake_client)
+
+    result = advisor.run_regression_only(prompt_file)
+    assert result["action"] == "regression_tested"
+    assert result["total"] == 1
+    assert result["ok"] is True
+
+
+def test_run_regression_only_detects_failure(tmp_path, monkeypatch):
+    import advisor
+    from unittest.mock import MagicMock
+
+    payload = {
+        "universal_must_not_contain": ["MAGIC_FORBIDDEN"],
+        "cases": [{
+            "id": "rg_fail", "dialogue_messages": [{"role": "user", "content": "x"}],
+            "must_not_contain": [], "must_not_violate_rules": [], "expected_behavior": "",
+        }],
+    }
+    reg_file = tmp_path / "regression_set.json"
+    reg_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(advisor, "REGRESSION_PATH", reg_file)
+
+    prompt_file = tmp_path / "system_prompt.md"
+    prompt_file.write_text("x", encoding="utf-8")
+
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value.choices = [
+        MagicMock(message=MagicMock(content="包含 MAGIC_FORBIDDEN 的回复"))
+    ]
+    monkeypatch.setattr(advisor, "llm_advisor", fake_client)
+
+    result = advisor.run_regression_only(prompt_file)
+    assert result["ok"] is False
+    assert result["pass_rate"] == 0.0

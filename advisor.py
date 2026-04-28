@@ -26,8 +26,10 @@ PENDING_DIR        = PROMPTS_DIR / "pending"
 CHANGELOG          = PROMPTS_DIR / "CHANGELOG.md"
 SYSTEM_PROMPT_PATH = PROMPTS_DIR / "system_prompt.md"
 CASES_PATH         = Path("tests/cases.json")
+REGRESSION_PATH    = Path("tests/regression_set.json")
 FEEDBACK_PATH      = Path("feedback/pending.md")
 REPORTS_DIR        = Path("reports")
+ADVISOR_LOG_DIR    = REPORTS_DIR / "advisor"
 
 DIFY_VAR_PATTERN = re.compile(r"\{\{#[^#}]+#\}\}")
 
@@ -510,7 +512,7 @@ def generate_candidate(
 
 
 # ── 主循环 ────────────────────────────────────────────────────────────────────
-MAX_RETRIES = 3
+MAX_RETRIES = 5
 HOLDOUT_PASS_THRESHOLD = 0.75
 
 
@@ -527,80 +529,173 @@ def _load_cases() -> tuple[list[dict], list[dict]]:
     return optimize, holdout
 
 
+def _load_regression_cases() -> tuple[list[dict], float]:
+    """读取人工维护的稳定回归测试集，返回 (cases, publish_threshold)。"""
+    if not REGRESSION_PATH.exists():
+        return [], 0.95
+    try:
+        data = json.loads(REGRESSION_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return [], 0.95
+
+    universal_blacklist = data.get("universal_must_not_contain", []) or []
+    threshold = data.get("_meta", {}).get("publish_threshold", 0.95)
+
+    cases = []
+    for c in data.get("cases", []):
+        per_case_blacklist = c.get("must_not_contain") or []
+        merged = list({*universal_blacklist, *per_case_blacklist})
+
+        case = {
+            "id":                    c["id"],
+            "split":                 "regression",
+            "source":                f"regression_{c['id']}",
+            "category":              c.get("category", ""),
+            "customer_input":        "",
+            "must_not_contain":      merged,
+            "must_not_violate_rules": c.get("must_not_violate_rules", []),
+            "expected_behavior":     c.get("expected_behavior", ""),
+            "dialogue_messages":     c.get("dialogue_messages", []),
+        }
+        for m in reversed(case["dialogue_messages"]):
+            if m.get("role") == "user":
+                case["customer_input"] = m["content"]
+                break
+        cases.append(case)
+    return cases, threshold
+
+
+def _record_advisor_log(date: str, payload: dict) -> Path:
+    """每天追加一条 advisor 运行记录（即便没发布也要留痕）。"""
+    ADVISOR_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    out = ADVISOR_LOG_DIR / f"{date}.json"
+    if out.exists():
+        try:
+            history = json.loads(out.read_text(encoding="utf-8"))
+            if not isinstance(history, list):
+                history = [history]
+        except (json.JSONDecodeError, OSError):
+            history = []
+    else:
+        history = []
+    history.append({"timestamp": datetime.datetime.now().isoformat(timespec="seconds"), **payload})
+    out.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+    return out
+
+
 def run_advisor(
     report_path: Path,
     extract_only: bool = False,
     rollback: str = "",
     auto_publish: bool = False,
 ) -> dict:
-    """默认半监督模式：候选通过测试后写入 pending 等待人工审核。
-    auto_publish=True 时直接发布（仅用于全自动场景）。
+    """飞轮主循环：验证集驱动迭代，回归测试集守住稳定性底线。
+    候选必须依次通过：optimize 集 → holdout 子集 → 回归测试集，全过才进入 pending。
+    任一环节失败都把失败 case 喂回下一轮 generate_candidate，迭代直到全过或超出 MAX_RETRIES。
+    auto_publish=True 时跳过人工审核直接发布。
     """
+    date_str = datetime.date.today().isoformat()
+
     if rollback:
         rollback_version(rollback)
+        _record_advisor_log(date_str, {"action": "rolled_back", "version": rollback})
         return {"action": "rolled_back", "version": rollback}
 
     new_cases = extract_cases(report_path)
     print(f"  → 新增测试用例 {len(new_cases)} 条")
 
     if extract_only:
+        _record_advisor_log(date_str, {"action": "extracted", "new_cases": len(new_cases)})
         return {"action": "extracted", "new_cases": len(new_cases)}
 
     report_text    = report_path.read_text(encoding="utf-8")
     current_prompt = SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
     feedback_text  = FEEDBACK_PATH.read_text(encoding="utf-8") if FEEDBACK_PATH.exists() else ""
-    optimize_cases, holdout_cases = _load_cases()
+    optimize_cases, holdout_cases    = _load_cases()
+    regression_cases, regression_thr = _load_regression_cases()
 
-    if not optimize_cases:
-        print("  → 优化集为空，跳过本轮优化")
+    if not optimize_cases and not regression_cases:
+        print("  → 优化集与回归集均为空，跳过本轮")
+        _record_advisor_log(date_str, {"action": "skipped", "reason": "no_cases"})
         return {"action": "skipped", "reason": "no_cases"}
 
-    failures = None
+    print(f"  → 验证集：optimize {len(optimize_cases)}  |  holdout {len(holdout_cases)}")
+    print(f"  → 测试集：regression {len(regression_cases)}（阈值 {regression_thr:.0%}）")
+
+    failures: list[dict] | None = None
+    iter_log: list[dict] = []
+
     for attempt in range(1, MAX_RETRIES + 1):
-        print(f"\n  [优化 {attempt}/{MAX_RETRIES}] 生成候选提示词...")
+        print(f"\n  [迭代 {attempt}/{MAX_RETRIES}] 生成候选提示词...")
         result = generate_candidate(
             report_text, feedback_text, current_prompt, optimize_cases, failures
         )
         candidate = result.get("candidate_prompt", current_prompt)
 
-        print(f"  → 评估优化集（{len(optimize_cases)} 条）...")
-        opt_eval = evaluate_candidate(candidate, optimize_cases)
-        print(f"     优化集：{opt_eval['passed_count']}/{opt_eval['total']}")
+        # 1. 验证集（cases.json[optimize]）— 驱动迭代
+        if optimize_cases:
+            print(f"  → 评估 optimize 集（{len(optimize_cases)}）...")
+            opt_eval = evaluate_candidate(candidate, optimize_cases)
+            print(f"     {opt_eval['passed_count']}/{opt_eval['total']}")
+            if not opt_eval["passed"]:
+                failures = opt_eval["failures"]
+                iter_log.append({"attempt": attempt, "stage": "optimize", "failures": len(failures)})
+                print(f"     ✗ optimize 失败 {len(failures)} 条，回喂下一轮")
+                continue
+            opt_result = f"{opt_eval['passed_count']}/{opt_eval['total']}"
+        else:
+            opt_result = "N/A"
 
-        if not opt_eval["passed"]:
-            failures = opt_eval["failures"]
-            print(f"     ✗ 优化集未通过，失败 {len(failures)} 条")
-            continue
-
-        print(f"  → 评估验证集（{len(holdout_cases)} 条）...")
+        # 2. 验证子集（cases.json[holdout]）— 防过拟合
         if holdout_cases:
+            print(f"  → 评估 holdout 集（{len(holdout_cases)}）...")
             hold_eval = evaluate_candidate(candidate, holdout_cases)
             hold_rate = hold_eval["passed_count"] / hold_eval["total"]
-            print(f"     验证集：{hold_eval['passed_count']}/{hold_eval['total']}（{hold_rate:.0%}）")
+            print(f"     {hold_eval['passed_count']}/{hold_eval['total']}（{hold_rate:.0%}）")
             if hold_rate < HOLDOUT_PASS_THRESHOLD:
                 failures = hold_eval["failures"]
-                print(f"     ✗ 验证集通过率 {hold_rate:.0%} < {HOLDOUT_PASS_THRESHOLD:.0%}，重试")
+                iter_log.append({"attempt": attempt, "stage": "holdout", "failures": len(failures)})
+                print(f"     ✗ holdout {hold_rate:.0%} < {HOLDOUT_PASS_THRESHOLD:.0%}，回喂下一轮")
                 continue
             hold_result = f"{hold_eval['passed_count']}/{hold_eval['total']}"
         else:
-            hold_result = "N/A（验证集为空）"
+            hold_result = "N/A"
 
+        # 3. 回归测试集 — 稳定性底线（人工维护，不得退化）
+        if regression_cases:
+            print(f"  → 评估 regression 集（{len(regression_cases)}）...")
+            reg_eval = evaluate_candidate(candidate, regression_cases)
+            reg_rate = reg_eval["passed_count"] / reg_eval["total"]
+            print(f"     {reg_eval['passed_count']}/{reg_eval['total']}（{reg_rate:.0%}）")
+            if reg_rate < regression_thr:
+                # 关键：回归失败也回喂为新验证案例，驱动下一轮修复
+                failures = reg_eval["failures"]
+                iter_log.append({"attempt": attempt, "stage": "regression", "failures": len(failures)})
+                print(f"     ✗ regression {reg_rate:.0%} < {regression_thr:.0%}，回归失败回喂下一轮")
+                continue
+            reg_result = f"{reg_eval['passed_count']}/{reg_eval['total']}"
+        else:
+            reg_result = "N/A"
+
+        # 全部通过 → 入闸
         version = get_next_version()
         change_info = {
             "module":            result.get("module", ""),
             "violated_rule":     result.get("violated_rule", ""),
             "conversion_impact": result.get("conversion_impact", ""),
             "reason":            result.get("reason", ""),
-            "opt_result":        f"{opt_eval['passed_count']}/{opt_eval['total']}",
+            "opt_result":        opt_result,
             "hold_result":       hold_result,
+            "regression_result": reg_result,
         }
 
         if auto_publish:
             try:
                 publish_version(candidate=candidate, version=version, change_info=change_info)
             except ValueError as e:
-                print(f"  ✗ 发布被拒：{e}")
+                print(f"  ✗ 发布被拒（Dify 变量校验失败）：{e}")
                 failures = [{"id": "_dify_var_check", "reason": str(e)}]
+                iter_log.append({"attempt": attempt, "stage": "dify_var", "failures": 1})
                 continue
             print(f"  → 自动发布 {version} 成功！模块：{result.get('module')}")
             action = "published"
@@ -610,28 +705,57 @@ def run_advisor(
             except ValueError as e:
                 print(f"  ✗ 候选被拒：{e}")
                 failures = [{"id": "_dify_var_check", "reason": str(e)}]
+                iter_log.append({"attempt": attempt, "stage": "dify_var", "failures": 1})
                 continue
             print(f"  → 候选 {version} 已生成，等待人工审核：{pending_path}")
             action = "pending"
 
-        # 仅在成功生成候选时清空反馈，失败时保留供下次重试
         if FEEDBACK_PATH.exists() and feedback_text.strip():
             FEEDBACK_PATH.write_text("", encoding="utf-8")
 
-        return {
-            "action":      action,
-            "version":     version,
-            "module":      result.get("module"),
-            "reason":      result.get("reason"),
-            "opt_result":  f"{opt_eval['passed_count']}/{opt_eval['total']}",
-            "hold_result": hold_result,
+        run_payload = {
+            "action":            action,
+            "version":           version,
+            "module":            result.get("module"),
+            "reason":            result.get("reason"),
+            "opt_result":        opt_result,
+            "hold_result":       hold_result,
+            "regression_result": reg_result,
+            "iterations":        iter_log,
         }
+        _record_advisor_log(date_str, run_payload)
+        return run_payload
 
-    print(f"  → {MAX_RETRIES} 次重试全失败，本轮放弃")
+    # 全部重试用尽未通过：候选不发布，把当前失败留档供明天接力
+    print(f"  → {MAX_RETRIES} 轮迭代未收敛，本轮不发布")
+    failed_payload = {
+        "action":     "failed",
+        "attempts":   MAX_RETRIES,
+        "failures":   failures or [],
+        "iterations": iter_log,
+    }
+    _record_advisor_log(date_str, failed_payload)
+    return failed_payload
+
+
+def run_regression_only(prompt_path: Path = SYSTEM_PROMPT_PATH) -> dict:
+    """仅对当前 system_prompt.md 跑一遍回归测试集，不修改任何文件。"""
+    if not prompt_path.exists():
+        raise FileNotFoundError(prompt_path)
+    cases, threshold = _load_regression_cases()
+    if not cases:
+        return {"action": "regression_skipped", "reason": "empty"}
+    prompt = prompt_path.read_text(encoding="utf-8")
+    result = evaluate_candidate(prompt, cases)
+    pass_rate = result["passed_count"] / result["total"] if result["total"] else 0.0
     return {
-        "action":   "failed",
-        "attempts": MAX_RETRIES,
-        "failures": failures or [],
+        "action":    "regression_tested",
+        "total":     result["total"],
+        "passed":    result["passed_count"],
+        "pass_rate": pass_rate,
+        "threshold": threshold,
+        "ok":        pass_rate >= threshold,
+        "failures":  result["failures"],
     }
 
 
@@ -708,6 +832,8 @@ def main():
     parser.add_argument("--approve",      default="",  help="人工审批 pending 候选，如 v002")
     parser.add_argument("--auto-publish", action="store_true",
                         help="跳过人工审核直接发布（默认半监督模式生成 pending）")
+    parser.add_argument("--test-only",    action="store_true",
+                        help="只跑回归测试集对照当前 system_prompt.md，不优化")
     args = parser.parse_args()
 
     date_str = datetime.date.today().isoformat()
@@ -715,13 +841,32 @@ def main():
     print(f"  BeautsGO Advisor  |  {date_str}")
     print(f"{'='*52}\n")
 
-    if args.approve:
+    if args.test_only:
+        try:
+            result = run_regression_only()
+        except FileNotFoundError as e:
+            print(f"  ✗ {e} 不存在")
+            return
+        if result["action"] == "regression_skipped":
+            print("  → 回归集为空，无需测试")
+            return
+        rate = result["pass_rate"]
+        print(f"  → 回归集：{result['passed']}/{result['total']}（{rate:.0%}），阈值 {result['threshold']:.0%}")
+        print(f"  → {'通过' if result['ok'] else '未通过'}")
+        if not result["ok"]:
+            print("\n  失败 case：")
+            for f in result["failures"][:10]:
+                print(f"    - {f['id']}: {f['reason']}")
+        _record_advisor_log(date_str, result)
+        return
+    elif args.approve:
         try:
             info = approve_pending(args.approve)
         except (FileNotFoundError, ValueError) as e:
             print(f"  ✗ 审批失败：{e}")
             return
         result = {"action": "approved", "version": info["version"], "module": info["module"]}
+        _record_advisor_log(date_str, result)
     elif args.rollback:
         result = run_advisor(report_path=Path("."), rollback=args.rollback)
     else:
