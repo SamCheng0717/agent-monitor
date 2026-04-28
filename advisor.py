@@ -22,11 +22,18 @@ DINGTALK_SECRET  = os.getenv("DINGTALK_SECRET", "")
 
 PROMPTS_DIR        = Path("prompts")
 VERSIONS_DIR       = PROMPTS_DIR / "versions"
+PENDING_DIR        = PROMPTS_DIR / "pending"
 CHANGELOG          = PROMPTS_DIR / "CHANGELOG.md"
 SYSTEM_PROMPT_PATH = PROMPTS_DIR / "system_prompt.md"
 CASES_PATH         = Path("tests/cases.json")
 FEEDBACK_PATH      = Path("feedback/pending.md")
 REPORTS_DIR        = Path("reports")
+
+DIFY_VAR_PATTERN = re.compile(r"\{\{#[^#}]+#\}\}")
+
+
+def _extract_dify_vars(text: str) -> set[str]:
+    return set(DIFY_VAR_PATTERN.findall(text))
 
 # ── 解析日报劣质对话区块 ────────────────────────────────────────────────────
 _SECTION_RE = re.compile(
@@ -52,30 +59,73 @@ def _parse_bad_sections(report_text: str) -> list[dict]:
     return results
 
 
+_KEYWORD_BLACKLIST = [
+    "我们", "我帮", "我来", "案例", "知识库", "数据库",
+    "保证", "绝对", "百分之百", "AI", "机器人", "智能客服", "助手",
+]
+
+
+def _extract_keyword_violations(text: str) -> list[str]:
+    return [kw for kw in _KEYWORD_BLACKLIST if kw in text]
+
+
 def _section_to_case(section: dict, source_date: str = "") -> dict:
-    date = source_date
+    """旧 markdown 格式回退用。无完整对话历史。"""
     problems = section.get("problems", "")
-    forbidden: list[str] = []
-    for kw in ["我们", "我帮", "我来", "案例", "知识库", "数据库", "保证", "绝对", "百分之百", "AI", "机器人", "智能客服", "助手"]:
-        if kw in problems or kw in section.get("ai_reply", ""):
-            forbidden.append(kw)
+    forbidden = _extract_keyword_violations(problems + " " + section.get("ai_reply", ""))
 
     case_id = f"tc_{section['conv_id']}"
     split = "holdout" if random.random() < 0.2 else "optimize"
     return {
-        "id":               case_id,
-        "split":            split,
-        "source":           f"{date}_{section['conv_id']}",
-        "customer_input":   section.get("customer_turn", "")[:120],
-        "must_not_contain": forbidden,
-        "expected_behavior": section.get("suggestion", ""),
+        "id":                   case_id,
+        "split":                split,
+        "source":                f"{source_date}_{section['conv_id']}",
+        "customer_input":       section.get("customer_turn", "")[:120],
+        "must_not_contain":     forbidden,
+        "must_not_violate_rules": [],
+        "expected_behavior":    section.get("suggestion", ""),
+        "dialogue_messages":    [],
+    }
+
+
+def _record_to_case(record: dict, source_date: str) -> dict:
+    """从结构化 JSON 日报的一条 bad_conversation 生成测试用例。"""
+    rules = [v.get("rule", "") for v in record.get("violations", []) if v.get("rule")]
+    keyword_violations = _extract_keyword_violations(record.get("bad_turn", ""))
+
+    case_id = f"tc_{record['conv_id']}"
+    split = "holdout" if random.random() < 0.2 else "optimize"
+    return {
+        "id":                    case_id,
+        "split":                 split,
+        "source":                f"{source_date}_{record['conv_id']}",
+        "customer_input":        record.get("customer_turn", "")[:120],
+        "must_not_contain":      keyword_violations,
+        "must_not_violate_rules": rules,
+        "expected_behavior":     record.get("suggestion", ""),
+        "dialogue_messages":     record.get("messages", [])[-30:],
+        "converted":             bool(record.get("converted")),
     }
 
 
 def extract_cases(report_path: Path) -> list[dict]:
-    text = report_path.read_text(encoding="utf-8")
+    """优先从同名 .json 结构化日报抽取；不存在时退回 .md regex 解析。"""
     date_str = report_path.stem
-    sections = _parse_bad_sections(text)
+    json_path = report_path.with_suffix(".json")
+
+    new_records: list[dict] = []
+    if json_path.exists():
+        try:
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+            for rec in payload.get("bad_conversations", []):
+                new_records.append(("json", rec))
+        except (json.JSONDecodeError, OSError):
+            new_records = []
+
+    if not new_records and report_path.exists():
+        text = report_path.read_text(encoding="utf-8")
+        for sec in _parse_bad_sections(text):
+            new_records.append(("md", sec))
 
     if CASES_PATH.exists():
         try:
@@ -87,10 +137,11 @@ def extract_cases(report_path: Path) -> list[dict]:
     existing_sources = {c["source"] for c in existing}
 
     new_cases = []
-    for sec in sections:
-        case = _section_to_case(sec, source_date=date_str)
+    for kind, rec in new_records:
+        case = _record_to_case(rec, date_str) if kind == "json" else _section_to_case(rec, date_str)
         if case["source"] not in existing_sources:
             new_cases.append(case)
+            existing_sources.add(case["source"])
 
     if new_cases:
         all_cases = existing + new_cases
@@ -103,6 +154,15 @@ def extract_cases(report_path: Path) -> list[dict]:
 _BEHAVIOR_JUDGE_PROMPT = """\
 以下是 AI 客服的一条回复，判断它是否满足要求："{behavior}"
 只回答 JSON：{{"ok": true}} 或 {{"ok": false}}
+
+AI回复：
+{reply}"""
+
+
+_VIOLATION_JUDGE_PROMPT = """\
+判断以下 AI 客服回复是否违反规则：「{rule}」
+{history_context}
+只回答 JSON：{{"violates": true}} 或 {{"violates": false}}
 
 AI回复：
 {reply}"""
@@ -125,24 +185,72 @@ def _judge_behavior(reply: str, behavior: str) -> bool:
         return False  # 保守策略：解析失败时拒绝，避免误放行
 
 
+def _judge_violates(reply: str, rule: str, history: list[dict] | None = None) -> bool:
+    history_context = ""
+    if history:
+        recent = history[-8:]
+        rendered = "\n".join(
+            f"[{'顾客' if m['role']=='user' else 'AI'}] {m['content']}" for m in recent
+        )
+        history_context = f"\n相关对话历史：\n{rendered}\n"
+    r = llm_advisor.chat.completions.create(
+        model=ADVISOR_MODEL,
+        messages=[{"role": "user", "content": _VIOLATION_JUDGE_PROMPT.format(
+            rule=rule, history_context=history_context, reply=reply
+        )}],
+        temperature=0.0,
+        max_tokens=20,
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    )
+    text = (r.choices[0].message.content or "").strip()
+    try:
+        return bool(json.loads(text).get("violates", False))
+    except Exception:
+        return False  # 保守策略：解析失败不判违规，避免主管循环卡死
+
+
+def _build_eval_messages(candidate_prompt: str, case: dict) -> tuple[list[dict], list[dict]]:
+    """返回 (发送给候选模型的 messages, 用于违规判定的 history)。"""
+    history = case.get("dialogue_messages") or []
+    if history:
+        # 多轮：候选 prompt 作 system + 完整历史回放
+        # history 应已以最后一条 user 消息结尾；若不是，截断到最后一条 user
+        last_user_idx = -1
+        for i in range(len(history) - 1, -1, -1):
+            if history[i].get("role") == "user":
+                last_user_idx = i
+                break
+        if last_user_idx == -1:
+            messages = [{"role": "system", "content": candidate_prompt}]
+            messages.append({"role": "user", "content": case.get("customer_input", "")})
+            return messages, []
+        replay = history[: last_user_idx + 1]
+        messages = [{"role": "system", "content": candidate_prompt}, *replay]
+        return messages, replay[:-1]  # 判违规时不重复包含本轮 user
+    # 单轮回退
+    messages = [
+        {"role": "system", "content": candidate_prompt},
+        {"role": "user",   "content": case.get("customer_input", "")},
+    ]
+    return messages, []
+
+
 def evaluate_candidate(candidate_prompt: str, cases: list[dict]) -> dict:
-    """用候选提示词模拟回复每条用例，返回 {passed, total, passed_count, failures}。"""
+    """用候选提示词回放每条用例，返回 {passed, total, passed_count, failures}。"""
     failures = []
     for case in cases:
-        # 1. 模拟 AI 回复
+        messages, history = _build_eval_messages(candidate_prompt, case)
+
         resp = llm_advisor.chat.completions.create(
             model=ADVISOR_MODEL,
-            messages=[
-                {"role": "system", "content": candidate_prompt},
-                {"role": "user",   "content": case["customer_input"]},
-            ],
+            messages=messages,
             temperature=0.1,
             max_tokens=256,
             extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         reply = (resp.choices[0].message.content or "").strip()
 
-        # 2. 检查违禁词（精确字符串匹配）
+        # 1. 关键词级违规
         hit = [w for w in case.get("must_not_contain", []) if w in reply]
         if hit:
             failures.append({
@@ -150,14 +258,26 @@ def evaluate_candidate(candidate_prompt: str, cases: list[dict]) -> dict:
             })
             continue
 
-        # 3. 检查期望行为（LLM 判断）
+        # 2. 语义级违规（对照具体规则）
+        violated_rules = []
+        for rule in case.get("must_not_violate_rules", []):
+            if rule and _judge_violates(reply, rule, history):
+                violated_rules.append(rule)
+        if violated_rules:
+            failures.append({
+                "id":     case["id"],
+                "reason": f"违反规则：{violated_rules}",
+                "reply":  reply[:200],
+            })
+            continue
+
+        # 3. 期望行为
         if case.get("expected_behavior"):
-            ok = _judge_behavior(reply, case["expected_behavior"])
-            if not ok:
+            if not _judge_behavior(reply, case["expected_behavior"]):
                 failures.append({
-                    "id": case["id"],
+                    "id":     case["id"],
                     "reason": f"未满足：{case['expected_behavior']}",
-                    "reply": reply[:200],
+                    "reply":  reply[:200],
                 })
 
     total = len(cases)
@@ -184,13 +304,33 @@ def get_next_version() -> str:
     return f"v{n:03d}"
 
 
+def _validate_dify_vars(candidate: str) -> None:
+    """对比候选与当前 system_prompt 的 Dify 变量集合，集合不一致直接拒绝发布。"""
+    if not SYSTEM_PROMPT_PATH.exists():
+        return
+    current = SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+    current_vars = _extract_dify_vars(current)
+    candidate_vars = _extract_dify_vars(candidate)
+    if current_vars == candidate_vars:
+        return
+    missing = current_vars - candidate_vars
+    extra = candidate_vars - current_vars
+    raise ValueError(
+        f"Dify 变量校验失败，拒绝发布。"
+        f"丢失：{sorted(missing) or '无'}；新增：{sorted(extra) or '无'}"
+    )
+
+
 def publish_version(candidate: str, version: str, change_info: dict) -> None:
     """归档当前提示词为 version_date.md，写入候选版本，追加 CHANGELOG。
 
     归档语义：vNNN_date.md 存的是该版本的候选内容（非发布前的旧版本）。
     rollback vNNN = 恢复到 vNNN 发布时的提示词内容。
     首次发布时额外保存 v000 备份以保留原始状态。
+    发布前校验 Dify 变量必须与当前完全一致。
     """
+    _validate_dify_vars(candidate)
+
     today = datetime.date.today().isoformat()
     VERSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -219,6 +359,45 @@ def publish_version(candidate: str, version: str, change_info: dict) -> None:
     CHANGELOG.parent.mkdir(parents=True, exist_ok=True)
     with CHANGELOG.open("a", encoding="utf-8") as f:
         f.write(entry)
+
+
+def stage_pending(candidate: str, version: str, change_info: dict) -> Path:
+    """候选通过测试后写入 pending_vXXX_date.md，等待人工审核。
+    同时保存元数据 .json 给 approve_pending 用。Dify 变量在此阶段就预校验。
+    """
+    _validate_dify_vars(candidate)
+
+    today = datetime.date.today().isoformat()
+    PENDING_DIR.mkdir(parents=True, exist_ok=True)
+    md_path   = PENDING_DIR / f"pending_{version}_{today}.md"
+    meta_path = PENDING_DIR / f"pending_{version}_{today}.json"
+    md_path.write_text(candidate, encoding="utf-8")
+    meta_path.write_text(
+        json.dumps({"version": version, "date": today, **change_info},
+                   ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return md_path
+
+
+def approve_pending(version: str) -> dict:
+    """人工审核通过 → 真正调用 publish_version 上线，清理 pending 文件。"""
+    md_files = sorted(PENDING_DIR.glob(f"pending_{version}_*.md"))
+    if not md_files:
+        raise FileNotFoundError(f"未找到待审核版本：pending_{version}_*.md")
+    md_path = md_files[-1]
+    meta_path = md_path.with_suffix(".json")
+    if not meta_path.exists():
+        raise FileNotFoundError(f"待审核版本缺少元数据：{meta_path.name}")
+
+    candidate = md_path.read_text(encoding="utf-8")
+    change_info = json.loads(meta_path.read_text(encoding="utf-8"))
+
+    publish_version(candidate=candidate, version=version, change_info=change_info)
+
+    md_path.unlink()
+    meta_path.unlink()
+    return {"version": version, "module": change_info.get("module", "")}
 
 
 def rollback_version(
@@ -352,7 +531,11 @@ def run_advisor(
     report_path: Path,
     extract_only: bool = False,
     rollback: str = "",
+    auto_publish: bool = False,
 ) -> dict:
+    """默认半监督模式：候选通过测试后写入 pending 等待人工审核。
+    auto_publish=True 时直接发布（仅用于全自动场景）。
+    """
     if rollback:
         rollback_version(rollback)
         return {"action": "rolled_back", "version": rollback}
@@ -403,24 +586,40 @@ def run_advisor(
             hold_result = "N/A（验证集为空）"
 
         version = get_next_version()
-        publish_version(
-            candidate=candidate,
-            version=version,
-            change_info={
-                "module":      result.get("module", ""),
-                "reason":      result.get("reason", ""),
-                "opt_result":  f"{opt_eval['passed_count']}/{opt_eval['total']}",
-                "hold_result": hold_result,
-            }
-        )
-        print(f"  → 发布 {version} 成功！模块：{result.get('module')}")
+        change_info = {
+            "module":            result.get("module", ""),
+            "violated_rule":     result.get("violated_rule", ""),
+            "conversion_impact": result.get("conversion_impact", ""),
+            "reason":            result.get("reason", ""),
+            "opt_result":        f"{opt_eval['passed_count']}/{opt_eval['total']}",
+            "hold_result":       hold_result,
+        }
 
-        # 仅在成功发布时清空反馈，失败时保留供下次重试或人工介入
+        if auto_publish:
+            try:
+                publish_version(candidate=candidate, version=version, change_info=change_info)
+            except ValueError as e:
+                print(f"  ✗ 发布被拒：{e}")
+                failures = [{"id": "_dify_var_check", "reason": str(e)}]
+                continue
+            print(f"  → 自动发布 {version} 成功！模块：{result.get('module')}")
+            action = "published"
+        else:
+            try:
+                pending_path = stage_pending(candidate=candidate, version=version, change_info=change_info)
+            except ValueError as e:
+                print(f"  ✗ 候选被拒：{e}")
+                failures = [{"id": "_dify_var_check", "reason": str(e)}]
+                continue
+            print(f"  → 候选 {version} 已生成，等待人工审核：{pending_path}")
+            action = "pending"
+
+        # 仅在成功生成候选时清空反馈，失败时保留供下次重试
         if FEEDBACK_PATH.exists() and feedback_text.strip():
             FEEDBACK_PATH.write_text("", encoding="utf-8")
 
         return {
-            "action":      "published",
+            "action":      action,
             "version":     version,
             "module":      result.get("module"),
             "reason":      result.get("reason"),
@@ -450,6 +649,23 @@ def send_advisor_dingtalk(result: dict, date: str) -> None:
             f"**改动模块**：{result.get('module', '')}",
             f"**原因**：{result.get('reason', '')[:200]}",
             f"**测试**：优化集 {result.get('opt_result')}，验证集 {result.get('hold_result')}",
+        ]
+    elif action == "pending":
+        title = f"候选提示词待审核 {result['version']} — {date}"
+        lines = [
+            f"## {title}", "",
+            f"**改动模块**：{result.get('module', '')}",
+            f"**原因**：{result.get('reason', '')[:200]}",
+            f"**测试**：优化集 {result.get('opt_result')}，验证集 {result.get('hold_result')}",
+            "",
+            f"人工审核通过后执行：`python advisor.py --approve {result['version']}`",
+        ]
+    elif action == "approved":
+        title = f"候选已审批发布 {result['version']} — {date}"
+        lines = [
+            f"## {title}", "",
+            f"**改动模块**：{result.get('module', '')}",
+            "已上线 system_prompt.md。",
         ]
     elif action == "failed":
         title = f"提示词优化未通过 — {date}"
@@ -489,6 +705,9 @@ def main():
     parser.add_argument("--report",       default="",  help="指定日报路径，默认取最新")
     parser.add_argument("--extract-only", action="store_true", help="只提取测试用例，不优化")
     parser.add_argument("--rollback",     default="",  help="回滚到指定版本，如 v002")
+    parser.add_argument("--approve",      default="",  help="人工审批 pending 候选，如 v002")
+    parser.add_argument("--auto-publish", action="store_true",
+                        help="跳过人工审核直接发布（默认半监督模式生成 pending）")
     args = parser.parse_args()
 
     date_str = datetime.date.today().isoformat()
@@ -496,7 +715,14 @@ def main():
     print(f"  BeautsGO Advisor  |  {date_str}")
     print(f"{'='*52}\n")
 
-    if args.rollback:
+    if args.approve:
+        try:
+            info = approve_pending(args.approve)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"  ✗ 审批失败：{e}")
+            return
+        result = {"action": "approved", "version": info["version"], "module": info["module"]}
+    elif args.rollback:
         result = run_advisor(report_path=Path("."), rollback=args.rollback)
     else:
         if args.report:
@@ -508,7 +734,11 @@ def main():
                 return
             report_path = reports[-1]
         print(f"  日报：{report_path}")
-        result = run_advisor(report_path, extract_only=args.extract_only)
+        result = run_advisor(
+            report_path,
+            extract_only=args.extract_only,
+            auto_publish=args.auto_publish,
+        )
 
     print(f"\n  结果：{result['action']}")
 

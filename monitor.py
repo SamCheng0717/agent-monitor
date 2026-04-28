@@ -39,6 +39,7 @@ DINGTALK_SECRET    = os.getenv("DINGTALK_SECRET", "")
 
 REPORTS = Path("reports")
 STATS   = REPORTS / "stats.json"
+SYSTEM_PROMPT_PATH = Path("prompts/system_prompt.md")
 
 
 # ── DB + Dify App API ────────────────────────────────────────────────────
@@ -165,6 +166,25 @@ def format_dialogue(messages: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def normalize_messages(messages: list[dict]) -> list[dict]:
+    """Dify {query, answer} 配对 → OpenAI [{role, content}] 列表。"""
+    out: list[dict] = []
+    for m in messages:
+        q = (m.get("query") or "").strip()
+        a = (m.get("answer") or "").strip()
+        if q:
+            out.append({"role": "user", "content": q})
+        if a:
+            out.append({"role": "assistant", "content": a})
+    return out
+
+
+def _load_system_prompt() -> str:
+    if SYSTEM_PROMPT_PATH.exists():
+        return SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+    return ""
+
+
 # ── 留资检测 (Qwen3-14B 本地) ──────────────────────────────────────────────
 CONVERSION_PROMPT = """\
 以下是一段客服对话，判断顾客是否留下了微信号或手机号。
@@ -192,31 +212,47 @@ def detect_conversion(dialogue: str) -> bool:
 
 # ── 质量评分 (DeepSeek) ────────────────────────────────────────────────────
 SCORE_PROMPT = """\
-分析以下客服对话。核心目标是让顾客留下微信号或电话，判断 AI 的哪些行为违反了系统提示词规则、导致顾客不愿意留资或直接离开。
+你是客服质量审计员。核心目标是让顾客留下微信号或电话号码（留资）。
+对照下方【系统提示词】审查对话，判断 AI 哪些回复违反了具体规则，并评估这些违规如何影响顾客留资意愿。
 
-【系统提示词违规检测（按严重程度排序）】
-1. 重复索要微信：历史中顾客已给过微信/手机号，AI 仍再次要求 → 严重违规，顾客会反感
-2. 工作时间拒绝直接回答：08:30–23:00，顾客问具体项目，AI 不给任何信息只让留微信 → 违规，顾客会直接走
-3. 直接报编造价格：超声刀/热玛吉/丽珠兰/黄金微针/玻尿酸/肉毒素应给知识库区间，AI 却自行编造具体数字 → 违规，降低专业可信度
-4. 顾客追问同一问题 2 次以上 AI 仍未回答 → AI 绕圈子，顾客失去耐心离开
-5. 使用第一人称「我/我们/我帮/我来」→ 违规
-6. 违禁词「案例/知识库/数据库/系统/保证/绝对/百分之百/AI/机器人/智能客服/助手」→ 违规，暴露技术实现或过度承诺
-7. 顾客出现负面情绪词（没用/烦/算了/什么破）→ AI 回复方式引发反感
+【系统提示词】
+{system_prompt}
 
-输出 JSON（只输出 JSON）：
-{{"score": 0.35, "problems": ["工作时间拒绝直接回答", "顾客追问未回答"], "customer_turn": "触发该问题的顾客原话", "bad_turn": "AI违规回复原文", "suggestion": "应该怎么回才能促进留资"}}
+【审查重点】
+1. 必须严格对照上方系统提示词的具体条款找违规，不要凭印象
+2. 优先关注与"留资"直接相关的违规：重复索要微信、工作时间无故拒答、编造具体价格、引发顾客反感
+3. violations 数组列出每条具体违规：rule（被违反的规则原文摘录）、evidence（AI回复中的具体证据）、impact（对留资的影响）
+4. 没有违规时 violations 为空数组，score 接近 1.0
+
+输出 JSON（只输出 JSON，不要其他文字）：
+{{
+  "score": 0.35,
+  "violations": [
+    {{"rule": "禁止使用第一人称我/我们/我帮/我来", "evidence": "AI第3条回复出现「我帮您」", "impact": "破坏客服身份"}}
+  ],
+  "problems": ["简短的违规分类标签，便于聚合统计"],
+  "customer_turn": "触发问题的顾客原话",
+  "bad_turn": "AI违规回复原文",
+  "suggestion": "应该怎么回才能促进留资"
+}}
 
 对话：
 {dialogue}"""
 
 
-def score_conversation(dialogue: str) -> dict:
-    """用 DeepSeek 对对话质量打分并生成诊断建议。"""
+def score_conversation(dialogue: str, system_prompt: str | None = None) -> dict:
+    """用 DeepSeek 对照系统提示词找违规并打分。"""
+    if system_prompt is None:
+        system_prompt = _load_system_prompt()
+    prompt = SCORE_PROMPT.format(
+        system_prompt=(system_prompt or "（系统提示词未提供）")[:5000],
+        dialogue=dialogue,
+    )
     r = llm_ds.chat.completions.create(
         model=DS_MODEL,
-        messages=[{"role": "user", "content": SCORE_PROMPT.format(dialogue=dialogue)}],
+        messages=[{"role": "user", "content": prompt}],
         temperature=0.1,
-        max_tokens=512,
+        max_tokens=1024,
         extra_body={"chat_template_kwargs": {"enable_thinking": False}},
     )
     text = (r.choices[0].message.content or "").strip()
@@ -227,9 +263,15 @@ def score_conversation(dialogue: str) -> dict:
             text = text[4:]
         text = text.strip()
     try:
-        return json.loads(text)
+        result = json.loads(text)
+        result.setdefault("violations", [])
+        result.setdefault("problems", [])
+        result.setdefault("customer_turn", "")
+        result.setdefault("bad_turn", "")
+        result.setdefault("suggestion", "")
+        return result
     except Exception:
-        return {"score": 1.0, "problems": [], "bad_turn": "", "suggestion": ""}
+        return {"score": 1.0, "violations": [], "problems": [], "customer_turn": "", "bad_turn": "", "suggestion": ""}
 
 
 # ── 统计持久化 ──────────────────────────────────────────────────────────────
@@ -336,11 +378,15 @@ def generate_daily_report(
             probs = "、".join(s.get("problems", [])) or "未分类"
             conv_id = r["id"]
             user_id = r.get("user_id", "")
+            status = "未留资" if not r.get("converted") else "已留资"
             # 链接到日志列表页；右侧括注用户 UID 供 Dify 搜索框定位
             if conv_url_base:
-                heading = f"### [会话 {conv_id[:6]}]({conv_url_base}) 得分 {s['score']:.2f}　用户 `{user_id}`"
+                heading = (
+                    f"### [会话 {conv_id[:6]}]({conv_url_base}) 得分 {s['score']:.2f}　"
+                    f"{status}　用户 `{user_id}`"
+                )
             else:
-                heading = f"### [会话 {conv_id[:6]}] 得分 {s['score']:.2f}"
+                heading = f"### [会话 {conv_id[:6]}] 得分 {s['score']:.2f}　{status}"
             lines += [
                 heading,
                 f"**问题**：{probs}",
@@ -352,6 +398,47 @@ def generate_daily_report(
     REPORTS.mkdir(exist_ok=True)
     out = REPORTS / f"{date}.md"
     out.write_text("\n".join(lines), encoding="utf-8")
+    return out
+
+
+def save_structured_report(
+    date: str, results: list[dict], threshold: float = 0.6
+) -> Path:
+    """同步保存结构化 JSON 日报（advisor 用此读取完整对话和违规列表）。"""
+    total     = len(results)
+    converted = sum(1 for r in results if r.get("converted"))
+    bad = [r for r in results if r["score"]["score"] < threshold]
+
+    bad_records = []
+    for r in bad:
+        s = r["score"]
+        bad_records.append({
+            "conv_id":       r["id"],
+            "user_id":       r.get("user_id", ""),
+            "score":         s.get("score", 0.0),
+            "converted":     bool(r.get("converted")),
+            "violations":    s.get("violations", []),
+            "problems":      s.get("problems", []),
+            "customer_turn": s.get("customer_turn", ""),
+            "bad_turn":      s.get("bad_turn", ""),
+            "suggestion":    s.get("suggestion", ""),
+            "messages":      r.get("messages", [])[-30:],  # 最近 30 轮
+        })
+
+    payload = {
+        "date":      date,
+        "threshold": threshold,
+        "summary": {
+            "total":           total,
+            "converted":       converted,
+            "conversion_rate": round(converted / total, 3) if total else 0.0,
+            "bad_count":       len(bad),
+        },
+        "bad_conversations": bad_records,
+    }
+    REPORTS.mkdir(exist_ok=True)
+    out = REPORTS / f"{date}.json"
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return out
 
 
@@ -404,12 +491,19 @@ def generate_weekly_report() -> Path:
 
 
 # ── 单条对话处理（用于并发）──────────────────────────────────────────────────
-def process_conversation(conv_id: str, dialogue: str, user_id: str = "") -> dict:
+def process_conversation(
+    conv_id: str,
+    dialogue: str,
+    user_id: str = "",
+    system_prompt: str | None = None,
+    messages: list[dict] | None = None,
+) -> dict:
     return {
         "id":        conv_id,
         "user_id":   user_id,
         "converted": detect_conversion(dialogue),
-        "score":     score_conversation(dialogue),
+        "score":     score_conversation(dialogue, system_prompt),
+        "messages":  messages or [],
     }
 
 
@@ -442,8 +536,8 @@ def main():
         return
 
     print(f"\n[2/4] 拉取消息记录...")
-    # {conv_id: (user_id, dialogue)}
-    dialogues: dict[str, tuple[str, str]] = {}
+    # {conv_id: {user_id, text, messages}}
+    dialogues: dict[str, dict] = {}
     conv_users = {c["id"]: c.get("_uid", "") for c in convs}
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futures = {ex.submit(fetch_messages, c["id"], conv_users[c["id"]]): c["id"] for c in convs}
@@ -451,17 +545,28 @@ def main():
             cid = futures[f]
             try:
                 msgs = f.result()
-                dialogues[cid] = (conv_users[cid], format_dialogue(msgs))
+                dialogues[cid] = {
+                    "user_id":  conv_users[cid],
+                    "text":     format_dialogue(msgs),
+                    "messages": normalize_messages(msgs),
+                }
             except Exception as e:
                 print(f"  ⚠ 拉取对话 {cid[:8]} 消息失败：{e}")
     print(f"  → {len(dialogues)} 条消息记录拉取完成")
+
+    system_prompt = _load_system_prompt()
+    if not system_prompt:
+        print("  ⚠ prompts/system_prompt.md 不存在，scoring 将无法对照规则")
 
     print(f"\n[3/4] 留资检测 + 质量评分...")
     results: list[dict] = []
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futures2 = {
-            ex.submit(process_conversation, cid, dia, uid): cid
-            for cid, (uid, dia) in dialogues.items()
+            ex.submit(
+                process_conversation,
+                cid, d["text"], d["user_id"], system_prompt, d["messages"]
+            ): cid
+            for cid, d in dialogues.items()
         }
         done = 0
         for f in as_completed(futures2):
@@ -490,6 +595,8 @@ def main():
     if args.report in ("daily", "both"):
         path = generate_daily_report(date_str, results, args.threshold, conv_url_base)
         print(f"  → 日报: {path}")
+        json_path = save_structured_report(date_str, results, args.threshold)
+        print(f"  → 结构化数据: {json_path}")
     if args.report in ("weekly", "both"):
         try:
             path = generate_weekly_report()
