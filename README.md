@@ -145,6 +145,9 @@ cp .env.example .env
 # 拉取生产对话生成日报
 python monitor.py
 
+# 操作员仪表盘：当前版本 / 用例集 / 待审 pending / 近 7 日数据
+python advisor.py --status
+
 # 先跑回归集冒烟看当前 prompt 健康度
 python advisor.py --test-only
 
@@ -153,6 +156,9 @@ python advisor.py
 
 # 人工审核 prompts/pending/pending_v001_*.md 后
 python advisor.py --approve v001
+
+# 出问题回滚
+python advisor.py --rollback v001
 ```
 
 ### 测试

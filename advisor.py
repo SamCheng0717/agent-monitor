@@ -738,6 +738,143 @@ def run_advisor(
     return failed_payload
 
 
+def collect_status() -> dict:
+    """聚合操作员关心的状态：当前版本、用例集大小、待审 pending、近 7 日运营摘要。"""
+    today = datetime.date.today()
+
+    # 当前 prompt
+    if SYSTEM_PROMPT_PATH.exists():
+        sp = SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+        sp_chars = len(sp)
+        sp_vars = sorted(_extract_dify_vars(sp))
+    else:
+        sp_chars, sp_vars = 0, []
+
+    # 已发布版本（按字典序末尾即最新）；vNNN_<date>.md 取 vNNN 部分
+    versions = []
+    if VERSIONS_DIR.exists():
+        for p in sorted(VERSIONS_DIR.glob("v*.md")):
+            versions.append(p.stem.split("_", 1)[0])
+    latest_version = versions[-1] if versions else "（未发布）"
+
+    # cases.json
+    optimize_cases, holdout_cases = _load_cases()
+    regression_cases, regression_thr = _load_regression_cases()
+
+    # 待审 pending
+    pending_files = []
+    if PENDING_DIR.exists():
+        for p in sorted(PENDING_DIR.glob("pending_v*.md")):
+            try:
+                mtime = datetime.datetime.fromtimestamp(p.stat().st_mtime)
+            except OSError:
+                mtime = None
+            pending_files.append({"path": str(p), "version": p.stem.split("_")[1], "mtime": mtime})
+
+    # 近 7 日 monitor 留资率
+    stats = []
+    stats_path = REPORTS_DIR / "stats.json"
+    if stats_path.exists():
+        try:
+            stats = json.loads(stats_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            stats = []
+    cutoff = (today - datetime.timedelta(days=6)).isoformat()
+    recent_stats = [s for s in stats if s.get("date", "") >= cutoff]
+
+    # 近 7 日 advisor 行动
+    recent_advisor: dict[str, list[dict]] = {}
+    if ADVISOR_LOG_DIR.exists():
+        for p in sorted(ADVISOR_LOG_DIR.glob("????-??-??.json")):
+            date = p.stem
+            if date < cutoff:
+                continue
+            try:
+                recent_advisor[date] = json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+
+    return {
+        "today":             today.isoformat(),
+        "system_prompt": {
+            "current_version": latest_version,
+            "char_count":      sp_chars,
+            "dify_vars":       sp_vars,
+        },
+        "cases": {
+            "optimize":   len(optimize_cases),
+            "holdout":    len(holdout_cases),
+            "regression": len(regression_cases),
+            "regression_threshold": regression_thr,
+        },
+        "pending":           pending_files,
+        "recent_stats":      recent_stats,
+        "recent_advisor":    recent_advisor,
+    }
+
+
+def print_status(status: dict) -> None:
+    print(f"\n{'='*60}")
+    print(f"  agent-monitor 状态  |  {status['today']}")
+    print(f"{'='*60}\n")
+
+    sp = status["system_prompt"]
+    print(f"【系统提示词】")
+    print(f"  当前版本：{sp['current_version']}")
+    print(f"  字符数：  {sp['char_count']}")
+    print(f"  Dify 变量：{len(sp['dify_vars'])} 个")
+    for v in sp["dify_vars"]:
+        print(f"    · {v}")
+
+    cases = status["cases"]
+    print(f"\n【测试集】")
+    print(f"  optimize（生产失败，驱动迭代）：{cases['optimize']} 条")
+    print(f"  holdout （防过拟合）：           {cases['holdout']} 条")
+    print(f"  regression（人工维护，守底线）： {cases['regression']} 条 "
+          f"（阈值 {cases['regression_threshold']:.0%}）")
+
+    pending = status["pending"]
+    print(f"\n【待审核】")
+    if not pending:
+        print(f"  （无）")
+    else:
+        for p in pending:
+            mtime = p["mtime"].strftime("%Y-%m-%d %H:%M") if p["mtime"] else "?"
+            print(f"  {p['version']}  生成于 {mtime}")
+            print(f"    {p['path']}")
+
+    print(f"\n【近 7 日 monitor 留资率】")
+    if not status["recent_stats"]:
+        print(f"  （暂无数据）")
+    else:
+        for s in status["recent_stats"]:
+            rate = s.get("rate", 0.0)
+            print(f"  {s['date']}  对话 {s.get('total', 0):3d}  留资 "
+                  f"{s.get('converted', 0):3d}  劣质 {s.get('bad', 0):3d}  "
+                  f"留资率 {rate*100:5.1f}%")
+
+    print(f"\n【近 7 日 advisor 行动】")
+    if not status["recent_advisor"]:
+        print(f"  （暂无数据）")
+    else:
+        for date, runs in status["recent_advisor"].items():
+            for r in runs:
+                action = r.get("action", "?")
+                version = r.get("version", "")
+                module = r.get("module", "")
+                tail = []
+                if version:
+                    tail.append(version)
+                if module:
+                    tail.append(module)
+                if action == "failed":
+                    tail.append(f"{r.get('attempts', '?')}轮全失败")
+                tail_str = "  ".join(tail)
+                print(f"  {date}  {action:<18s}  {tail_str}")
+
+    print()
+
+
 def run_regression_only(prompt_path: Path = SYSTEM_PROMPT_PATH) -> dict:
     """仅对当前 system_prompt.md 跑一遍回归测试集，不修改任何文件。"""
     if not prompt_path.exists():
@@ -834,12 +971,18 @@ def main():
                         help="跳过人工审核直接发布（默认半监督模式生成 pending）")
     parser.add_argument("--test-only",    action="store_true",
                         help="只跑回归测试集对照当前 system_prompt.md，不优化")
+    parser.add_argument("--status",       action="store_true",
+                        help="操作员仪表盘：当前版本/用例集/pending/近 7 日数据")
     args = parser.parse_args()
 
     date_str = datetime.date.today().isoformat()
     print(f"{'='*52}")
     print(f"  BeautsGO Advisor  |  {date_str}")
     print(f"{'='*52}\n")
+
+    if args.status:
+        print_status(collect_status())
+        return
 
     if args.test_only:
         try:

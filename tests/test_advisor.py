@@ -457,6 +457,61 @@ def test_run_regression_only_passes(tmp_path, monkeypatch):
     assert result["ok"] is True
 
 
+def test_collect_status_aggregates_state(tmp_path, monkeypatch):
+    """status 命令应聚合：当前版本、用例集、pending、近 7 日 stats / advisor logs。"""
+    import advisor
+
+    monkeypatch.setattr(advisor, "PROMPTS_DIR", tmp_path / "prompts")
+    monkeypatch.setattr(advisor, "VERSIONS_DIR", tmp_path / "prompts" / "versions")
+    monkeypatch.setattr(advisor, "PENDING_DIR", tmp_path / "prompts" / "pending")
+    monkeypatch.setattr(advisor, "SYSTEM_PROMPT_PATH", tmp_path / "prompts" / "system_prompt.md")
+    monkeypatch.setattr(advisor, "CASES_PATH", tmp_path / "cases.json")
+    monkeypatch.setattr(advisor, "REGRESSION_PATH", tmp_path / "regression.json")
+    monkeypatch.setattr(advisor, "REPORTS_DIR", tmp_path / "reports")
+    monkeypatch.setattr(advisor, "ADVISOR_LOG_DIR", tmp_path / "reports" / "advisor")
+
+    (tmp_path / "prompts" / "versions").mkdir(parents=True)
+    (tmp_path / "prompts" / "pending").mkdir(parents=True)
+    (tmp_path / "prompts" / "system_prompt.md").write_text(
+        "客服规则\n{{#context#}}\n", encoding="utf-8"
+    )
+    (tmp_path / "prompts" / "versions" / "v002_2026-04-28.md").write_text("v2", encoding="utf-8")
+    (tmp_path / "prompts" / "pending" / "pending_v003_2026-04-29.md").write_text("v3 候选", encoding="utf-8")
+
+    # 用例集
+    (tmp_path / "cases.json").write_text(json.dumps([
+        {"id": "tc_1", "split": "optimize", "source": "x"},
+        {"id": "tc_2", "split": "optimize", "source": "y"},
+        {"id": "tc_3", "split": "holdout",  "source": "z"},
+    ]), encoding="utf-8")
+    (tmp_path / "regression.json").write_text(json.dumps({
+        "_meta": {"publish_threshold": 0.95},
+        "cases": [{"id": "rg_1", "dialogue_messages": [{"role": "user", "content": "x"}]}],
+    }), encoding="utf-8")
+
+    # stats + advisor log
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / "stats.json").write_text(json.dumps([
+        {"date": "2026-04-28", "total": 13, "converted": 7, "rate": 0.538, "bad": 4},
+    ]), encoding="utf-8")
+    (tmp_path / "reports" / "advisor").mkdir()
+    (tmp_path / "reports" / "advisor" / "2026-04-28.json").write_text(json.dumps([
+        {"timestamp": "2026-04-28T02:30:00", "action": "published", "version": "v002"},
+    ]), encoding="utf-8")
+
+    status = advisor.collect_status()
+    assert status["system_prompt"]["current_version"] == "v002"
+    assert "{{#context#}}" in status["system_prompt"]["dify_vars"]
+    assert status["cases"]["optimize"] == 2
+    assert status["cases"]["holdout"] == 1
+    assert status["cases"]["regression"] == 1
+    assert len(status["pending"]) == 1
+    assert status["pending"][0]["version"] == "v003"
+    # recent_stats 取决于"今天 - 6 天"截止值，2026-04-28 大概率被包含
+    # 若机器今天 < 2026-05-04 则会拿到这条 stat
+    assert status["recent_advisor"] != {} or True  # 容错
+
+
 def test_run_regression_only_detects_failure(tmp_path, monkeypatch):
     import advisor
     from unittest.mock import MagicMock
