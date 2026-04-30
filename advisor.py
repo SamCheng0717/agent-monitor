@@ -521,10 +521,19 @@ def generate_candidate(
             lines.append(f"- {f['id']}: {f['reason']}")
         failure_section = "\n".join(lines)
 
+    # 反馈支持多条用空行分隔，每条可能是多行（含粘贴的对话片段+人工观察）
+    fb_clean = (feedback_text or "").strip()
+    if fb_clean:
+        entries = re.split(r"\n\s*\n+", fb_clean)
+        rendered = "\n\n".join(f"反馈 {i+1}:\n{e.strip()}" for i, e in enumerate(entries) if e.strip())
+        feedback_for_prompt = rendered[:5000]
+    else:
+        feedback_for_prompt = "（无）"
+
     prompt = _SUPERVISOR_PROMPT.format(
         current_prompt=current_prompt,
         report_text=report_text[:3000],
-        feedback_text=feedback_text[:1000] if feedback_text else "（无）",
+        feedback_text=feedback_for_prompt,
         n_cases=len(optimize_cases),
         cases_text=cases_text,
         failure_section=failure_section,

@@ -258,11 +258,23 @@
       <h3 class="text-sm text-slate-400 uppercase tracking-wider">人工反馈 — feedback/pending.md</h3>
       <span class="text-xs text-slate-500" id="feedback-mtime">—</span>
     </div>
-    <p class="text-xs text-slate-500 mb-2">下次 advisor 跑时会读取这里的内容。每条反馈用换行分隔，advisor 发布成功后自动清空。</p>
-    <textarea id="feedback-input" rows="4"
+    <p class="text-xs text-slate-500 mb-2">
+      整个文本会作为一段反馈喂给主管 LLM。<strong>多条反馈之间用空行（按两次回车）分隔</strong>，
+      可以直接粘贴对话片段加你的观察。advisor 成功发布后自动清空。
+    </p>
+    <textarea id="feedback-input" rows="10"
+              oninput="updateFeedbackCount()"
               class="w-full bg-slate-900/60 border border-slate-700 rounded-lg p-3 font-mono text-sm text-slate-200 focus:outline-none focus:border-cyan-500/60"
-              placeholder="例：2026-04-30 客服：顾客主动说想加微信，AI 还在反复推价格表，应直接确认收到微信号即可…"></textarea>
-    <div class="flex justify-end mt-2">
+              placeholder="2026-04-30 客服：顾客已主动说想加微信，AI 反复要微信号 (粘贴对话片段)
+[顾客] 可以加一下客服微信详细咨询吗
+[AI] 方便再留一个微信号吗？客服会直接加您
+[AI] 请您留个微信号，客服这边会尽快联系您
+观察：顾客已表达加微信意愿，AI 应直接确认收到，绝不再要
+
+(空一行分隔下一条反馈)
+2026-04-30 客服：丽珠兰报具体数字 (3400/4900) 是错的，应给区间或引导留资"></textarea>
+    <div class="flex items-center justify-between mt-2">
+      <span class="text-xs text-slate-500" id="feedback-count">0 字 / 0 条</span>
       <button onclick="saveFeedback()" id="feedback-save-btn"
               class="px-4 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/30 text-sm">
         保存
@@ -1067,6 +1079,14 @@ async function loadFeedback() {
   document.getElementById("feedback-input").value = r.content || "";
   document.getElementById("feedback-mtime").textContent =
     r.mtime ? `上次保存：${r.mtime}` : "（空）";
+  updateFeedbackCount();
+}
+
+function updateFeedbackCount() {
+  const t = document.getElementById("feedback-input").value;
+  const chars = t.length;
+  const entries = t.trim() ? t.trim().split(/\n\s*\n+/).length : 0;
+  document.getElementById("feedback-count").textContent = `${chars} 字 / ${entries} 条反馈`;
 }
 
 async function saveFeedback() {
