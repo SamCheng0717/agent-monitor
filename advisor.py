@@ -731,38 +731,18 @@ _PROMOTE_HEADER_RE = re.compile(
 )
 
 
-def promote_regression() -> tuple[int, Path]:
-    """读 regression_candidates.md 中已勾选的候选，写入 regression_set_real.json。
-    返回 (新增条数, 文件路径)。
-    """
-    if not REGRESSION_CANDIDATES_PATH.exists():
-        raise FileNotFoundError(f"先跑 --mine-regression 生成 {REGRESSION_CANDIDATES_PATH}")
-
-    text = REGRESSION_CANDIDATES_PATH.read_text(encoding="utf-8")
+def _promote_by_sources(selections: list[dict]) -> int:
+    """selections: [{source, rule}]。把每条对应的真实对话写入 regression_set_real.json。
+    返回新增条数。供 CLI / Web API 共用。"""
     grouped = _gather_real_violations(top_per_rule=999)
     by_source: dict[str, dict] = {}
     for grp in grouped:
         for c in grp["candidates"]:
             by_source[f"{c['date']}_{c['conv_id']}"] = c
 
-    # 找 [x] 的 source
-    selected_sources = []
-    current_rule = None
-    for line in text.split("\n"):
-        if line.startswith("## "):
-            current_rule = line[3:].split("（")[0].strip()
-        m = _PROMOTE_HEADER_RE.match(line)
-        if m:
-            selected_sources.append((m.group("source"), current_rule))
-
-    if not selected_sources:
-        return 0, REGRESSION_REAL_PATH
-
-    # 加载已有
     if REGRESSION_REAL_PATH.exists():
         existing = json.loads(REGRESSION_REAL_PATH.read_text(encoding="utf-8"))
     else:
-        # 沿用合成集的 universal_must_not_contain
         syn_universal = []
         if REGRESSION_PATH.exists():
             try:
@@ -782,8 +762,10 @@ def promote_regression() -> tuple[int, Path]:
 
     seen_sources = {c.get("source", "") for c in existing["cases"]}
     added = 0
-    for source, rule in selected_sources:
-        if source in seen_sources:
+    for sel in selections:
+        source = sel.get("source", "")
+        rule = sel.get("rule", "")
+        if not source or source in seen_sources:
             continue
         cand = by_source.get(source)
         if not cand:
@@ -803,11 +785,70 @@ def promote_regression() -> tuple[int, Path]:
         added += 1
 
     existing["_meta"]["last_updated"] = datetime.date.today().isoformat()
-
     REGRESSION_REAL_PATH.parent.mkdir(parents=True, exist_ok=True)
     REGRESSION_REAL_PATH.write_text(
         json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    return added
+
+
+def get_mining_candidates(top_per_rule: int = 5) -> dict:
+    """供 Web 用：返回结构化候选数据，不写 markdown 文件。
+    自动跳过已晋升的 source。
+    """
+    grouped = _gather_real_violations(top_per_rule=top_per_rule)
+    seen = _read_existing_real_sources()
+
+    groups = []
+    total_candidates = 0
+    for grp in grouped:
+        items = []
+        for c in grp["candidates"]:
+            source = f"{c['date']}_{c['conv_id']}"
+            if source in seen:
+                continue
+            items.append({
+                "source":      source,
+                "score":       c["score"],
+                "user_id":     c["user_id"],
+                "messages":    c["messages"][-10:],
+                "evidence":    c["evidence"],
+                "impact":      c["impact"],
+                "customer_turn": c["customer_turn"],
+                "bad_turn":    c["bad_turn"],
+                "suggestion":  c["suggestion"],
+            })
+        if not items:
+            continue
+        groups.append({"rule": grp["rule"], "total": grp["total"], "candidates": items})
+        total_candidates += len(items)
+
+    return {
+        "groups":            groups,
+        "candidate_count":   total_candidates,
+        "already_promoted":  len(seen),
+    }
+
+
+def promote_regression() -> tuple[int, Path]:
+    """CLI 版：读 regression_candidates.md 中已勾选的候选，写入 regression_set_real.json。
+    返回 (新增条数, 文件路径)。
+    """
+    if not REGRESSION_CANDIDATES_PATH.exists():
+        raise FileNotFoundError(f"先跑 --mine-regression 生成 {REGRESSION_CANDIDATES_PATH}")
+
+    text = REGRESSION_CANDIDATES_PATH.read_text(encoding="utf-8")
+
+    selections: list[dict] = []
+    current_rule = None
+    for line in text.split("\n"):
+        if line.startswith("## "):
+            current_rule = line[3:].split("（")[0].strip()
+        m = _PROMOTE_HEADER_RE.match(line)
+        if m:
+            selections.append({"source": m.group("source"), "rule": current_rule or ""})
+
+    added = _promote_by_sources(selections)
     return added, REGRESSION_REAL_PATH
 
 

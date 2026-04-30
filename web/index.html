@@ -240,6 +240,27 @@
     </div>
   </section>
 
+  <!-- 回归集挖掘 -->
+  <section class="glass p-5">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="text-sm text-slate-400 uppercase tracking-wider">回归测试集挖掘</h3>
+      <div class="flex gap-2">
+        <button onclick="loadMineCandidates()" class="px-3 py-1.5 rounded-lg bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/30 text-sm">
+          扫历史 reports
+        </button>
+        <button onclick="promoteSelected()" id="promote-btn" class="px-3 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/30 text-sm disabled:opacity-30 disabled:cursor-not-allowed" disabled>
+          晋升选中（<span id="promote-count">0</span>）
+        </button>
+      </div>
+    </div>
+    <p class="text-xs text-slate-500 mb-3">
+      把真实生产违规对话晋升为回归测试 case，让稳定性测试不再依赖手写场景。
+      已晋升的 source 自动跳过。
+    </p>
+    <div id="mine-summary" class="text-xs text-slate-400 mb-3"></div>
+    <div id="mine-candidates" class="space-y-4 max-h-[60vh] overflow-auto"></div>
+  </section>
+
   <!-- Pending -->
   <section id="pending-section" class="glass p-5">
     <div class="flex items-center justify-between mb-4">
@@ -703,6 +724,106 @@ async function rejectCurrent() {
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+// ── 回归集挖掘 ─────────────────────────────────────────────────
+let mineSelected = new Set();  // source IDs 选中的
+
+async function loadMineCandidates() {
+  const wrap = document.getElementById("mine-candidates");
+  const summary = document.getElementById("mine-summary");
+  wrap.innerHTML = '<div class="text-slate-500 text-sm">扫描中...</div>';
+  mineSelected = new Set();
+  updatePromoteCount();
+
+  const data = await fetch("/api/regression/candidates?top_per_rule=5").then(r => r.json());
+  summary.textContent = `共 ${data.candidate_count} 条候选，分布在 ${data.groups.length} 类违规中（已晋升 ${data.already_promoted} 条已自动跳过）`;
+
+  if (!data.groups.length) {
+    wrap.innerHTML = '<div class="text-slate-500 text-sm">暂无可晋升的候选</div>';
+    return;
+  }
+
+  wrap.innerHTML = data.groups.map(grp => `
+    <div class="border border-slate-700 rounded-xl p-4 bg-slate-900/40">
+      <div class="flex items-center justify-between mb-3">
+        <h4 class="font-semibold text-amber-300">${escapeHtml(grp.rule)}</h4>
+        <span class="text-xs text-slate-500">历史命中 ${grp.total} 条 · 显示 Top ${grp.candidates.length}</span>
+      </div>
+      <div class="space-y-2">
+        ${grp.candidates.map(c => renderCandidate(c, grp.rule)).join("")}
+      </div>
+    </div>
+  `).join("");
+}
+
+function renderCandidate(c, rule) {
+  const dialogue = c.messages.map(m => {
+    const tag = m.role === "user" ? "顾客" : "AI";
+    const cls = m.role === "user" ? "text-cyan-300" : "text-slate-300";
+    return `<div class="${cls}"><span class="text-slate-500">[${tag}]</span> ${escapeHtml(m.content || "").slice(0, 200)}</div>`;
+  }).join("");
+
+  const safeId = c.source.replace(/[^a-z0-9]/gi, "_");
+  const ruleAttr = rule.replace(/"/g, "&quot;");
+
+  return `
+    <div class="border border-slate-700/60 rounded-lg p-3 hover:border-cyan-500/40 transition">
+      <div class="flex items-start gap-3">
+        <input type="checkbox" id="cb_${safeId}" class="mt-1.5"
+               onchange="toggleCandidate(this, '${escapeHtml(c.source)}', '${ruleAttr}')"/>
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-3 text-xs text-slate-500 mb-2">
+            <span class="font-mono text-slate-400">${escapeHtml(c.source)}</span>
+            <span>得分 ${c.score.toFixed(2)}</span>
+            <span>用户 \`${escapeHtml(c.user_id)}\`</span>
+          </div>
+          <div class="font-mono text-xs leading-relaxed bg-slate-950/60 rounded p-2 mb-2 max-h-40 overflow-auto">
+            ${dialogue}
+          </div>
+          <div class="text-xs text-slate-400 space-y-0.5">
+            <div><span class="text-slate-500">违规证据:</span> ${escapeHtml(c.evidence)}</div>
+            <div><span class="text-slate-500">留资影响:</span> ${escapeHtml(c.impact)}</div>
+            <div><span class="text-slate-500">建议回法:</span> ${escapeHtml(c.suggestion)}</div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
+function toggleCandidate(cb, source, rule) {
+  if (cb.checked) {
+    mineSelected.add(JSON.stringify({ source, rule }));
+  } else {
+    mineSelected.delete(JSON.stringify({ source, rule }));
+  }
+  updatePromoteCount();
+}
+
+function updatePromoteCount() {
+  const n = mineSelected.size;
+  document.getElementById("promote-count").textContent = n;
+  document.getElementById("promote-btn").disabled = n === 0;
+}
+
+async function promoteSelected() {
+  if (!mineSelected.size) return;
+  const selections = [...mineSelected].map(s => JSON.parse(s));
+  if (!confirm(`晋升 ${selections.length} 条到 regression_set_real.json？`)) return;
+
+  const r = await fetch("/api/regression/promote", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ selections }),
+  });
+  if (!r.ok) {
+    alert("晋升失败：" + await r.text());
+    return;
+  }
+  const result = await r.json();
+  alert(`已晋升 ${result.added} 条`);
+  await loadMineCandidates();
+  await loadAll();  // 刷新主仪表盘 KPI / 测试集计数
 }
 
 // ── 启动 ────────────────────────────────────────────────────────

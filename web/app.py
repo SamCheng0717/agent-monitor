@@ -149,6 +149,28 @@ def api_approve(version: str):
         raise HTTPException(400, str(e))
 
 
+@app.get("/api/regression/candidates")
+def api_regression_candidates(top_per_rule: int = 5):
+    """挖掘候选：扫 reports 按违规规则分组，跳过已晋升的。"""
+    return adv.get_mining_candidates(top_per_rule=top_per_rule)
+
+
+from fastapi import Body
+
+@app.post("/api/regression/promote")
+def api_regression_promote(payload: dict = Body(...)):
+    """selections: [{source, rule}, ...] → 写入 regression_set_real.json。"""
+    selections = payload.get("selections") or []
+    if not isinstance(selections, list):
+        raise HTTPException(400, "selections must be a list")
+    added = adv._promote_by_sources(selections)
+    adv._record_advisor_log(
+        datetime.date.today().isoformat(),
+        {"action": "regression_promoted", "added": added, "via": "web"},
+    )
+    return {"ok": True, "added": added}
+
+
 @app.post("/api/reject/{version}")
 def api_reject(version: str):
     """删除 pending，不发布。"""
