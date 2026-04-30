@@ -54,6 +54,10 @@ def _login(base: str, email: str, password: str, timeout: int = 10) -> requests.
         raise DifyPushError(f"登录返回非 success: {payload}")
     if "access_token" not in s.cookies:
         raise DifyPushError(f"登录成功但未拿到 access_token cookie")
+    # CSRF 双提交：state-changing 请求必须把 cookie 里的 csrf_token 复制到 X-CSRF-Token 头
+    csrf = s.cookies.get("csrf_token")
+    if csrf:
+        s.headers["X-CSRF-Token"] = csrf
     return s
 
 
