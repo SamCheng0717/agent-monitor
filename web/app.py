@@ -171,6 +171,115 @@ def api_regression_promote(payload: dict = Body(...)):
     return {"ok": True, "added": added}
 
 
+@app.post("/api/regression/run")
+def api_run_regression():
+    """跑一遍回归测试集对比当前 system_prompt.md。"""
+    try:
+        result = adv.run_regression_only()
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    adv._record_advisor_log(datetime.date.today().isoformat(), {"via": "web", **result})
+    return result
+
+
+@app.get("/api/feedback")
+def api_get_feedback():
+    """读 feedback/pending.md 内容 + 修改时间。"""
+    if not adv.FEEDBACK_PATH.exists():
+        return {"content": "", "mtime": None}
+    return {
+        "content": adv.FEEDBACK_PATH.read_text(encoding="utf-8"),
+        "mtime": datetime.datetime.fromtimestamp(adv.FEEDBACK_PATH.stat().st_mtime).isoformat(timespec="seconds"),
+    }
+
+
+@app.post("/api/feedback")
+def api_set_feedback(payload: dict = Body(...)):
+    content = payload.get("content", "")
+    adv.FEEDBACK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    adv.FEEDBACK_PATH.write_text(content, encoding="utf-8")
+    return {"ok": True, "size": len(content)}
+
+
+@app.get("/api/version/{version}")
+def api_get_version(version: str):
+    """取指定版本的归档 prompt + 对应 CHANGELOG 段。"""
+    import re as _re
+    files = sorted(adv.VERSIONS_DIR.glob(f"{version}_*.md")) if adv.VERSIONS_DIR.exists() else []
+    if not files:
+        raise HTTPException(404, f"未找到版本 {version}")
+    f = files[-1]
+    content = f.read_text(encoding="utf-8")
+
+    changelog_entry = ""
+    if adv.CHANGELOG.exists():
+        text = adv.CHANGELOG.read_text(encoding="utf-8")
+        m = _re.search(rf"## {_re.escape(version)} —.*?(?=\n## v|\Z)", text, _re.DOTALL)
+        if m:
+            changelog_entry = m.group().strip()
+
+    return {
+        "version":   version,
+        "date":      f.stem.split("_", 1)[1] if "_" in f.stem else "",
+        "size":      len(content),
+        "content":   content,
+        "changelog": changelog_entry,
+    }
+
+
+@app.post("/api/rollback/{version}")
+def api_rollback(version: str, payload: dict = Body(default={})):
+    """回滚 system_prompt.md 到指定版本。push=true 时同时推 Dify 生产。"""
+    push = bool(payload.get("push", False)) if isinstance(payload, dict) else False
+    try:
+        adv.rollback_version(version, versions_dir=adv.VERSIONS_DIR, target=adv.SYSTEM_PROMPT_PATH)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+
+    pushed = False
+    push_error = None
+    if push:
+        try:
+            from dify_push import push_prompt
+            content = adv.SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+            push_prompt(content, dry_run=False)
+            pushed = True
+        except Exception as e:
+            push_error = str(e)
+
+    adv._record_advisor_log(
+        datetime.date.today().isoformat(),
+        {"action": "rolled_back", "version": version, "pushed": pushed, "via": "web"},
+    )
+    return {"ok": True, "rolled_back": True, "pushed": pushed, "push_error": push_error}
+
+
+@app.post("/api/push-current")
+def api_push_current():
+    """把当前 system_prompt.md 重新推到 Dify（用于本地与 Dify 不一致时手工修复）。"""
+    try:
+        r = adv.push_current_to_dify()
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    adv._record_advisor_log(
+        datetime.date.today().isoformat(),
+        {"action": "dify_push", "via": "web", **r},
+    )
+    return {"ok": True, **r}
+
+
+@app.get("/api/report/{date}")
+def api_get_report(date: str):
+    """返回指定日期的结构化日报（reports/<date>.json）。"""
+    p = adv.REPORTS_DIR / f"{date}.json"
+    if not p.exists():
+        raise HTTPException(404, f"未找到 {date} 的日报")
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        raise HTTPException(500, str(e))
+
+
 @app.post("/api/reject/{version}")
 def api_reject(version: str):
     """删除 pending，不发布。"""

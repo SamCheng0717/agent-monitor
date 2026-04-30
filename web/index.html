@@ -221,7 +221,7 @@
     </div>
   </section>
 
-  <!-- 今日 Top 违规 + 测试集状态 -->
+  <!-- 今日 Top 违规 + 测试集状态 + 反馈 -->
   <section class="grid grid-cols-1 md:grid-cols-3 gap-4">
     <div class="glass p-5 md:col-span-2">
       <h3 class="text-sm text-slate-400 uppercase tracking-wider mb-4">今日 Top 违规</h3>
@@ -230,13 +230,37 @@
       </div>
     </div>
     <div class="glass p-5">
-      <h3 class="text-sm text-slate-400 uppercase tracking-wider mb-4">测试集状态</h3>
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="text-sm text-slate-400 uppercase tracking-wider">测试集状态</h3>
+        <button onclick="runRegression()" id="run-reg-btn" class="text-xs px-2 py-1 rounded bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/30">
+          立即跑回归
+        </button>
+      </div>
       <div class="space-y-3 text-sm">
         <div class="flex justify-between"><span class="text-slate-400">optimize（驱动迭代）</span><span class="font-mono" id="cases-opt">—</span></div>
         <div class="flex justify-between"><span class="text-slate-400">holdout（防过拟合）</span><span class="font-mono" id="cases-hold">—</span></div>
         <div class="flex justify-between"><span class="text-slate-400">regression（守底线）</span><span class="font-mono" id="cases-reg">—</span></div>
         <div class="border-t border-slate-700 pt-3 flex justify-between text-slate-300"><span>累计</span><span class="font-mono" id="cases-total">—</span></div>
+        <div id="run-reg-result" class="text-xs text-slate-400"></div>
       </div>
+    </div>
+  </section>
+
+  <!-- 人工反馈输入 -->
+  <section class="glass p-5">
+    <div class="flex items-center justify-between mb-3">
+      <h3 class="text-sm text-slate-400 uppercase tracking-wider">人工反馈 — feedback/pending.md</h3>
+      <span class="text-xs text-slate-500" id="feedback-mtime">—</span>
+    </div>
+    <p class="text-xs text-slate-500 mb-2">下次 advisor 跑时会读取这里的内容。每条反馈用换行分隔，advisor 发布成功后自动清空。</p>
+    <textarea id="feedback-input" rows="4"
+              class="w-full bg-slate-900/60 border border-slate-700 rounded-lg p-3 font-mono text-sm text-slate-200 focus:outline-none focus:border-cyan-500/60"
+              placeholder="例：2026-04-30 客服：顾客主动说想加微信，AI 还在反复推价格表，应直接确认收到微信号即可…"></textarea>
+    <div class="flex justify-end mt-2">
+      <button onclick="saveFeedback()" id="feedback-save-btn"
+              class="px-4 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/30 text-sm">
+        保存
+      </button>
     </div>
   </section>
 
@@ -302,6 +326,44 @@
   <footer class="text-center text-xs text-slate-600 py-6">
     agent-monitor · github.com/SamCheng0717/agent-monitor
   </footer>
+</div>
+
+<!-- 版本详情弹窗 -->
+<div id="version-modal" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 p-4 overflow-auto">
+  <div class="max-w-5xl mx-auto glass p-6 mt-8">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-xl font-bold" id="version-title">—</h2>
+      <button onclick="closeVersion()" class="text-slate-400 hover:text-white text-2xl leading-none">&times;</button>
+    </div>
+    <div id="version-meta" class="text-sm text-slate-300 space-y-1 mb-4"></div>
+    <div class="text-xs uppercase tracking-wider text-slate-400 mb-2">CHANGELOG 段</div>
+    <pre class="diff-pane glass p-3 mb-4 max-h-40 overflow-auto whitespace-pre-wrap" id="version-changelog"></pre>
+    <div class="text-xs uppercase tracking-wider text-slate-400 mb-2">完整 prompt</div>
+    <pre class="diff-pane glass p-3 mb-4 max-h-[40vh] overflow-auto whitespace-pre-wrap" id="version-content"></pre>
+    <div class="flex justify-between gap-3">
+      <div class="flex gap-2">
+        <button onclick="rollbackVersion(false)" class="px-4 py-2 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500/30 text-sm">
+          仅回滚本地
+        </button>
+        <button onclick="rollbackVersion(true)" class="px-4 py-2 rounded-lg bg-red-500/20 border border-red-500/50 text-red-300 hover:bg-red-500/30 text-sm">
+          回滚 + 同步推 Dify
+        </button>
+      </div>
+      <button onclick="closeVersion()" class="px-4 py-2 rounded-lg border border-slate-600 text-slate-300 hover:bg-slate-800 text-sm">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 日报详情弹窗 -->
+<div id="report-modal" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 p-4 overflow-auto">
+  <div class="max-w-6xl mx-auto glass p-6 mt-8">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-xl font-bold" id="report-title">—</h2>
+      <button onclick="closeReport()" class="text-slate-400 hover:text-white text-2xl leading-none">&times;</button>
+    </div>
+    <div id="report-summary" class="text-sm text-slate-300 mb-4"></div>
+    <div id="report-bad" class="space-y-3 max-h-[70vh] overflow-auto"></div>
+  </div>
 </div>
 
 <!-- Diff 弹窗 -->
@@ -545,12 +607,23 @@ function decideActiveStage(status, today) {
 
 function renderTrendCharts(history) {
   const labels = history.map(h => h.date.slice(5));  // MM-DD
+  const fullDates = history.map(h => h.date);
   const rates  = history.map(h => (h.rate * 100).toFixed(1));
   const bads   = history.map(h => h.bad);
+
+  const onChartClick = (evt, items, chart) => {
+    if (!items || !items.length) return;
+    const idx = items[0].index;
+    openReport(fullDates[idx]);
+  };
 
   const baseOpts = {
     responsive: true,
     plugins: { legend: { display: false }, tooltip: { intersect: false } },
+    onClick: onChartClick,
+    onHover: (e, items) => {
+      e.native.target.style.cursor = items && items.length ? "pointer" : "default";
+    },
     scales: {
       x: { grid: { color: "rgba(148,163,184,0.05)" }, ticks: { color: "#64748b" } },
       y: { grid: { color: "rgba(148,163,184,0.05)" }, ticks: { color: "#64748b" }, beginAtZero: true },
@@ -647,7 +720,9 @@ function renderTimeline(versions) {
       ${versions.map((v, i) => `
         <div class="flex items-center gap-4">
           <div class="text-center">
-            <div class="w-12 h-12 rounded-full ${i === versions.length - 1 ? 'bg-cyan-500/30 border-cyan-400' : 'bg-slate-800 border-slate-600'} border-2 flex items-center justify-center text-sm font-mono">${v.version}</div>
+            <button onclick="openVersion('${v.version}')"
+                    title="点击查看详情 / 回滚"
+                    class="w-12 h-12 rounded-full ${i === versions.length - 1 ? 'bg-cyan-500/30 border-cyan-400' : 'bg-slate-800 border-slate-600'} border-2 flex items-center justify-center text-sm font-mono hover:bg-cyan-500/40 transition cursor-pointer">${v.version}</button>
             <div class="text-xs text-slate-400 mt-2">${v.date || ""}</div>
           </div>
           ${i < versions.length - 1 ? '<div class="w-12 h-px bg-slate-700"></div>' : ''}
@@ -826,9 +901,168 @@ async function promoteSelected() {
   await loadAll();  // 刷新主仪表盘 KPI / 测试集计数
 }
 
+// ── 反馈输入 ────────────────────────────────────────────────────
+async function loadFeedback() {
+  const r = await fetch("/api/feedback").then(r => r.json());
+  document.getElementById("feedback-input").value = r.content || "";
+  document.getElementById("feedback-mtime").textContent =
+    r.mtime ? `上次保存：${r.mtime}` : "（空）";
+}
+
+async function saveFeedback() {
+  const btn = document.getElementById("feedback-save-btn");
+  const content = document.getElementById("feedback-input").value;
+  btn.disabled = true; btn.textContent = "保存中...";
+  try {
+    const r = await fetch("/api/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    await loadFeedback();
+    btn.textContent = "已保存 ✓";
+    setTimeout(() => { btn.textContent = "保存"; btn.disabled = false; }, 1500);
+  } catch (e) {
+    alert("保存失败：" + e.message);
+    btn.textContent = "保存"; btn.disabled = false;
+  }
+}
+
+// ── 立即跑回归测试 ─────────────────────────────────────────────
+async function runRegression() {
+  const btn = document.getElementById("run-reg-btn");
+  const out = document.getElementById("run-reg-result");
+  btn.disabled = true; btn.textContent = "测试中...";
+  out.textContent = "调用 LLM 中（30-60秒）...";
+  try {
+    const r = await fetch("/api/regression/run", { method: "POST" });
+    const data = await r.json();
+    if (data.action === "regression_skipped") {
+      out.textContent = "回归集为空";
+    } else {
+      const tag = data.ok ? '<span class="text-emerald-400">通过</span>' : '<span class="text-red-400">未通过</span>';
+      out.innerHTML = `${data.passed}/${data.total}（${(data.pass_rate*100).toFixed(0)}%）${tag}` +
+        (data.failures && data.failures.length
+          ? '<br/>' + data.failures.slice(0,5).map(f => `<span class="text-red-300">· ${escapeHtml(f.id)}: ${escapeHtml(f.reason).slice(0,60)}</span>`).join('<br/>')
+          : '');
+    }
+    await loadAll();
+  } catch (e) {
+    out.textContent = "失败：" + e.message;
+  }
+  btn.disabled = false; btn.textContent = "立即跑回归";
+}
+
+// ── 版本详情 + 回滚 ─────────────────────────────────────────────
+let currentVersion = null;
+
+async function openVersion(version) {
+  currentVersion = version;
+  try {
+    const data = await fetch(`/api/version/${version}`).then(r => {
+      if (!r.ok) throw new Error("加载失败");
+      return r.json();
+    });
+    document.getElementById("version-title").textContent = `${version} — ${data.date}`;
+    document.getElementById("version-meta").innerHTML = `
+      <div><span class="text-slate-500">字符数：</span> ${data.size}</div>
+    `;
+    document.getElementById("version-changelog").textContent = data.changelog || "（无 CHANGELOG 记录）";
+    document.getElementById("version-content").textContent = data.content;
+    document.getElementById("version-modal").classList.remove("hidden");
+  } catch (e) {
+    alert("加载失败：" + e.message);
+  }
+}
+function closeVersion() { document.getElementById("version-modal").classList.add("hidden"); currentVersion = null; }
+
+async function rollbackVersion(push) {
+  if (!currentVersion) return;
+  const tip = push ? `回滚到 ${currentVersion} 并推到 Dify 生产？` : `仅回滚本地到 ${currentVersion}？（生产 Dify 仍是当前版本）`;
+  if (!confirm(tip)) return;
+  try {
+    const r = await fetch(`/api/rollback/${currentVersion}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ push }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    if (push && !data.pushed) {
+      alert(`本地已回滚到 ${currentVersion}，但 Dify 推送失败：${data.push_error || ""}`);
+    } else {
+      alert(push ? `已回滚到 ${currentVersion} 并同步到 Dify` : `本地已回滚到 ${currentVersion}`);
+    }
+    closeVersion();
+    await loadAll();
+  } catch (e) {
+    alert("回滚失败：" + e.message);
+  }
+}
+
+// ── 历史日报详情 ────────────────────────────────────────────────
+async function openReport(date) {
+  try {
+    const data = await fetch(`/api/report/${date}`).then(r => {
+      if (!r.ok) throw new Error("找不到该日日报");
+      return r.json();
+    });
+    const s = data.summary || {};
+    document.getElementById("report-title").textContent = `日报详情 — ${date}`;
+    document.getElementById("report-summary").innerHTML = `
+      <div class="grid grid-cols-4 gap-3">
+        <div class="bg-slate-900/50 rounded p-3"><div class="text-xs text-slate-500">总对话</div><div class="text-xl font-mono">${s.total ?? 0}</div></div>
+        <div class="bg-slate-900/50 rounded p-3"><div class="text-xs text-slate-500">留资</div><div class="text-xl font-mono text-emerald-400">${s.converted ?? 0}</div></div>
+        <div class="bg-slate-900/50 rounded p-3"><div class="text-xs text-slate-500">留资率</div><div class="text-xl font-mono">${(((s.conversion_rate)||0)*100).toFixed(1)}%</div></div>
+        <div class="bg-slate-900/50 rounded p-3"><div class="text-xs text-slate-500">劣质</div><div class="text-xl font-mono text-red-400">${s.bad_count ?? 0}</div></div>
+      </div>`;
+    const bads = data.bad_conversations || [];
+    document.getElementById("report-bad").innerHTML = bads.length
+      ? bads.map(r => renderBadConversation(r)).join("")
+      : '<div class="text-slate-500 text-sm">当日无劣质对话</div>';
+    document.getElementById("report-modal").classList.remove("hidden");
+  } catch (e) {
+    alert(e.message);
+  }
+}
+function closeReport() { document.getElementById("report-modal").classList.add("hidden"); }
+
+function renderBadConversation(r) {
+  const status = r.converted ? '<span class="text-emerald-400">已留资</span>' : '<span class="text-red-400">未留资</span>';
+  const violations = (r.violations || []).map(v =>
+    `<li>${escapeHtml(v.rule)}<span class="text-slate-500"> — ${escapeHtml(v.evidence || "")}</span></li>`
+  ).join("");
+  const dialogue = (r.messages || []).slice(-12).map(m => {
+    const tag = m.role === "user" ? "顾客" : "AI";
+    const cls = m.role === "user" ? "text-cyan-300" : "text-slate-300";
+    return `<div class="${cls}"><span class="text-slate-500">[${tag}]</span> ${escapeHtml((m.content || "").slice(0, 300))}</div>`;
+  }).join("");
+  return `
+    <div class="border border-slate-700 rounded-lg p-3 bg-slate-900/40">
+      <div class="flex items-center gap-3 text-xs mb-2">
+        <span class="font-mono text-slate-400">${escapeHtml(r.conv_id)}</span>
+        <span>得分 ${(r.score || 0).toFixed(2)}</span>
+        ${status}
+        <span class="text-slate-500">用户 \`${escapeHtml(r.user_id || "")}\`</span>
+      </div>
+      ${violations ? `<ul class="text-xs text-amber-300 mb-2 ml-4 list-disc">${violations}</ul>` : ""}
+      <details class="text-xs">
+        <summary class="cursor-pointer text-slate-400 hover:text-slate-200">展开对话（${(r.messages || []).length} 轮）</summary>
+        <div class="font-mono text-xs leading-relaxed bg-slate-950/60 rounded p-2 mt-2 max-h-60 overflow-auto">${dialogue}</div>
+      </details>
+      <div class="text-xs text-slate-400 mt-2"><span class="text-slate-500">建议：</span> ${escapeHtml(r.suggestion || "")}</div>
+    </div>`;
+}
+
 // ── 启动 ────────────────────────────────────────────────────────
-loadAll();
-setInterval(loadAll, 60000); // 每分钟自动刷新
+async function bootstrap() {
+  await loadAll();
+  await loadFeedback();
+}
+bootstrap();
+setInterval(loadAll, 60000); // 每分钟自动刷新主仪表盘
+
 </script>
 
 </body>
