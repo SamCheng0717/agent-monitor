@@ -32,6 +32,10 @@ REGRESSION_CANDIDATES_PATH = Path("tests/regression_candidates.md")
 FEEDBACK_PATH      = Path("feedback/pending.md")
 REPORTS_DIR        = Path("reports")
 ADVISOR_LOG_DIR    = REPORTS_DIR / "advisor"
+STATS_PATH         = REPORTS_DIR / "stats.json"
+
+REGRESSION_DROP_PP_THRESHOLD = 2.0   # 留资率掉超过这个 pp 触发警告
+MIN_DAYS_FOR_VERSION_VERDICT = 3     # 至少观察这么多天才下版本结论
 
 DIFY_VAR_PATTERN = re.compile(r"\{\{#[^#}]+#\}\}")
 
@@ -467,6 +471,9 @@ _SUPERVISOR_PROMPT = """\
 【系统提示词模块结构】
 身份规则 / 回复风格 / 项目与价格 / 收到个人信息 / 微信引导时机 / 知识库使用
 
+【最近版本效果数据（关键：避免重蹈下跌版本的覆辙，加强上升版本的方向）】
+{version_perf_block}
+
 【当前系统提示词】
 {current_prompt}
 
@@ -543,6 +550,30 @@ def generate_candidate(
     else:
         feedback_for_prompt = "（无）"
 
+    # 版本效果信号：让主管 LLM 知道最近哪些方向带来留资率上升/下降
+    version_stats = get_version_conversion_stats()
+    if version_stats:
+        recent = version_stats[-4:]  # 最近 4 个版本
+        lines = []
+        for v in recent:
+            tag = "（最新，仍在跑）" if v["is_current"] else ""
+            module = v["module"] or "—"
+            if v["total_convs"] > 0:
+                rate_str = f"{v['avg_rate']*100:.1f}%"
+                if v["delta_pp"] is not None:
+                    arrow = "↑" if v["delta_pp"] > 0 else ("↓" if v["delta_pp"] < 0 else "→")
+                    delta_str = f" {arrow} {v['delta_pp']:+.1f}pp"
+                else:
+                    delta_str = "（基线）"
+                lines.append(
+                    f"- {v['version']} 改 [{module}]，留资率 {rate_str}（{v['days']} 天）{delta_str} {tag}"
+                )
+            else:
+                lines.append(f"- {v['version']} 改 [{module}]，暂无留资数据 {tag}")
+        version_perf_block = "\n".join(lines)
+    else:
+        version_perf_block = "（暂无历史版本数据）"
+
     prompt = _SUPERVISOR_PROMPT.format(
         current_prompt=current_prompt,
         report_text=report_text[:3000],
@@ -550,6 +581,7 @@ def generate_candidate(
         n_cases=len(optimize_cases),
         cases_text=cases_text,
         failure_section=failure_section,
+        version_perf_block=version_perf_block,
     )
     r = llm_advisor.chat.completions.create(
         model=ADVISOR_MODEL,
@@ -872,6 +904,114 @@ def promote_regression() -> tuple[int, Path]:
 
     added = _promote_by_sources(selections)
     return added, REGRESSION_REAL_PATH
+
+
+def _parse_version_modules_from_changelog() -> dict[str, str]:
+    """从 CHANGELOG.md 抽取每个版本的改动模块。"""
+    if not CHANGELOG.exists():
+        return {}
+    text = CHANGELOG.read_text(encoding="utf-8")
+    out: dict[str, str] = {}
+    for m in re.finditer(r"##\s*(v\d+)\s*[—\-]\s*\d{4}-\d{2}-\d{2}\s*\n(.+?)(?=\n##\s*v|\Z)",
+                          text, re.DOTALL):
+        ver, body = m.group(1), m.group(2)
+        mod = re.search(r"\*\*改动模块\*\*[：:]\s*(.+)", body)
+        if mod:
+            out[ver] = mod.group(1).strip()
+    return out
+
+
+def get_version_conversion_stats() -> list[dict]:
+    """每个发布版本在其活跃期内的平均留资率，含与上一版本的 pp 差。
+    版本活跃期 = [本版发布日, 下一版发布日)，最新版到今天为止。
+    返回按版本号升序，最新在末尾。
+    """
+    versions: list[tuple[str, str]] = []
+    if VERSIONS_DIR.exists():
+        for p in sorted(VERSIONS_DIR.glob("v*.md")):
+            try:
+                ver, date = p.stem.split("_", 1)
+            except ValueError:
+                continue
+            if ver == "v000":
+                continue  # v000 是历史快照，不是发布版本
+            versions.append((ver, date))
+
+    if STATS_PATH.exists():
+        try:
+            stats = json.loads(STATS_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            stats = []
+    else:
+        stats = []
+    by_date = {s.get("date", ""): s for s in stats}
+    modules = _parse_version_modules_from_changelog()
+    today = datetime.date.today().isoformat()
+
+    out: list[dict] = []
+    for i, (ver, start) in enumerate(versions):
+        end = versions[i + 1][1] if i + 1 < len(versions) else None  # None = 至今
+        # 收集 [start, end) 范围内的 daily stats
+        days_in_reign = []
+        for d, s in by_date.items():
+            if d < start:
+                continue
+            if end is not None and d >= end:
+                continue
+            days_in_reign.append(s)
+
+        total       = sum(s.get("total", 0)     for s in days_in_reign)
+        converted   = sum(s.get("converted", 0) for s in days_in_reign)
+        avg_rate    = (converted / total) if total else 0.0
+        out.append({
+            "version":      ver,
+            "publish_date": start,
+            "end_date":     end,        # None = 当前版本
+            "is_current":   end is None,
+            "days":         len(days_in_reign),
+            "total_convs":  total,
+            "converted":    converted,
+            "avg_rate":     round(avg_rate, 4),
+            "module":       modules.get(ver, ""),
+            "delta_pp":     None,
+        })
+
+    # 计算 pp 差（每版本 vs 前一个有数据的版本）
+    last_with_data = None
+    for v in out:
+        if last_with_data and v["total_convs"] > 0 and last_with_data["total_convs"] > 0:
+            v["delta_pp"] = round((v["avg_rate"] - last_with_data["avg_rate"]) * 100, 2)
+        if v["total_convs"] > 0:
+            last_with_data = v
+    return out
+
+
+def latest_version_regression_warning() -> dict | None:
+    """如果最新版本观察了 >= MIN_DAYS_FOR_VERSION_VERDICT 天，且留资率比上一版下跌
+    >= REGRESSION_DROP_PP_THRESHOLD pp，返回告警字典；否则 None。"""
+    stats = get_version_conversion_stats()
+    if len(stats) < 2:
+        return None
+    cur = stats[-1]
+    prev = stats[-2]
+    if not cur["is_current"]:
+        return None
+    if cur["days"] < MIN_DAYS_FOR_VERSION_VERDICT:
+        return None
+    if cur["delta_pp"] is None:
+        return None
+    if cur["delta_pp"] >= -REGRESSION_DROP_PP_THRESHOLD:
+        return None
+    return {
+        "version":      cur["version"],
+        "prev_version": prev["version"],
+        "delta_pp":     cur["delta_pp"],
+        "days":         cur["days"],
+        "cur_rate":     cur["avg_rate"],
+        "prev_rate":    prev["avg_rate"],
+        "cur_module":   cur["module"],
+        "prev_module":  prev["module"],
+    }
 
 
 _FEEDBACK_FIELDS = {

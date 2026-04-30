@@ -598,6 +598,126 @@ def test_load_regression_merges_synthetic_and_real(tmp_path, monkeypatch):
     assert "rg_syn_1" in ids and "rg_real_1" in ids
 
 
+def test_get_version_conversion_stats_attributes_days_to_versions(tmp_path, monkeypatch):
+    import advisor
+    monkeypatch.setattr(advisor, "VERSIONS_DIR", tmp_path / "versions")
+    monkeypatch.setattr(advisor, "STATS_PATH", tmp_path / "stats.json")
+    monkeypatch.setattr(advisor, "CHANGELOG", tmp_path / "CHANGELOG.md")
+    (tmp_path / "versions").mkdir()
+    (tmp_path / "versions" / "v001_2026-04-25.md").write_text("p1", encoding="utf-8")
+    (tmp_path / "versions" / "v002_2026-04-28.md").write_text("p2", encoding="utf-8")
+    (tmp_path / "CHANGELOG.md").write_text(
+        "## v001 — 2026-04-25\n**改动模块**：身份规则\n**原因**：x\n"
+        "## v002 — 2026-04-28\n**改动模块**：项目与价格\n**原因**：y\n",
+        encoding="utf-8",
+    )
+    # 6 天 stats：v001 reign = 4-25 ~ 4-27, v002 reign = 4-28 ~ today
+    (tmp_path / "stats.json").write_text(json.dumps([
+        {"date": "2026-04-25", "total": 100, "converted": 20, "rate": 0.2, "bad": 30},
+        {"date": "2026-04-26", "total": 100, "converted": 22, "rate": 0.22, "bad": 28},
+        {"date": "2026-04-27", "total": 100, "converted": 24, "rate": 0.24, "bad": 25},
+        {"date": "2026-04-28", "total": 100, "converted": 18, "rate": 0.18, "bad": 35},
+        {"date": "2026-04-29", "total": 100, "converted": 19, "rate": 0.19, "bad": 33},
+    ]), encoding="utf-8")
+
+    stats = advisor.get_version_conversion_stats()
+    assert len(stats) == 2
+    v1, v2 = stats
+    assert v1["version"] == "v001"
+    assert v1["days"] == 3
+    assert v1["converted"] == 66
+    assert v1["total_convs"] == 300
+    assert abs(v1["avg_rate"] - 0.22) < 0.001
+    assert v1["module"] == "身份规则"
+    assert v1["delta_pp"] is None  # 第一个版本无对比
+    assert v1["is_current"] is False
+
+    assert v2["version"] == "v002"
+    assert v2["days"] == 2
+    assert v2["module"] == "项目与价格"
+    assert v2["is_current"] is True
+    # 22% → 18.5%, delta = -3.5pp
+    assert abs(v2["delta_pp"] - (-3.5)) < 0.1
+
+
+def test_regression_warning_triggers_on_drop(tmp_path, monkeypatch):
+    import advisor
+    monkeypatch.setattr(advisor, "VERSIONS_DIR", tmp_path / "versions")
+    monkeypatch.setattr(advisor, "STATS_PATH", tmp_path / "stats.json")
+    monkeypatch.setattr(advisor, "CHANGELOG", tmp_path / "CHANGELOG.md")
+    monkeypatch.setattr(advisor, "MIN_DAYS_FOR_VERSION_VERDICT", 3)
+    monkeypatch.setattr(advisor, "REGRESSION_DROP_PP_THRESHOLD", 2.0)
+    (tmp_path / "versions").mkdir()
+    (tmp_path / "versions" / "v001_2026-04-25.md").write_text("p1", encoding="utf-8")
+    (tmp_path / "versions" / "v002_2026-04-28.md").write_text("p2", encoding="utf-8")
+    (tmp_path / "CHANGELOG.md").write_text(
+        "## v001 — 2026-04-25\n**改动模块**：A\n"
+        "## v002 — 2026-04-28\n**改动模块**：B\n",
+        encoding="utf-8",
+    )
+    # v001 22%, v002 18% (3 天)，下降 4pp，触发
+    (tmp_path / "stats.json").write_text(json.dumps([
+        {"date": "2026-04-25", "total": 100, "converted": 22, "rate": 0.22, "bad": 0},
+        {"date": "2026-04-26", "total": 100, "converted": 22, "rate": 0.22, "bad": 0},
+        {"date": "2026-04-27", "total": 100, "converted": 22, "rate": 0.22, "bad": 0},
+        {"date": "2026-04-28", "total": 100, "converted": 18, "rate": 0.18, "bad": 0},
+        {"date": "2026-04-29", "total": 100, "converted": 18, "rate": 0.18, "bad": 0},
+        {"date": "2026-04-30", "total": 100, "converted": 18, "rate": 0.18, "bad": 0},
+    ]), encoding="utf-8")
+
+    w = advisor.latest_version_regression_warning()
+    assert w is not None
+    assert w["version"] == "v002"
+    assert w["prev_version"] == "v001"
+    assert w["delta_pp"] < -3.0
+
+
+def test_regression_warning_silent_when_under_threshold(tmp_path, monkeypatch):
+    import advisor
+    monkeypatch.setattr(advisor, "VERSIONS_DIR", tmp_path / "versions")
+    monkeypatch.setattr(advisor, "STATS_PATH", tmp_path / "stats.json")
+    monkeypatch.setattr(advisor, "CHANGELOG", tmp_path / "CHANGELOG.md")
+    monkeypatch.setattr(advisor, "MIN_DAYS_FOR_VERSION_VERDICT", 3)
+    monkeypatch.setattr(advisor, "REGRESSION_DROP_PP_THRESHOLD", 2.0)
+    (tmp_path / "versions").mkdir()
+    (tmp_path / "versions" / "v001_2026-04-25.md").write_text("p1", encoding="utf-8")
+    (tmp_path / "versions" / "v002_2026-04-28.md").write_text("p2", encoding="utf-8")
+    (tmp_path / "CHANGELOG.md").write_text("", encoding="utf-8")
+    # 几乎持平
+    (tmp_path / "stats.json").write_text(json.dumps([
+        {"date": "2026-04-25", "total": 100, "converted": 22, "rate": 0.22, "bad": 0},
+        {"date": "2026-04-26", "total": 100, "converted": 22, "rate": 0.22, "bad": 0},
+        {"date": "2026-04-27", "total": 100, "converted": 22, "rate": 0.22, "bad": 0},
+        {"date": "2026-04-28", "total": 100, "converted": 21, "rate": 0.21, "bad": 0},
+        {"date": "2026-04-29", "total": 100, "converted": 21, "rate": 0.21, "bad": 0},
+        {"date": "2026-04-30", "total": 100, "converted": 21, "rate": 0.21, "bad": 0},
+    ]), encoding="utf-8")
+    assert advisor.latest_version_regression_warning() is None
+
+
+def test_regression_warning_silent_when_too_few_days(tmp_path, monkeypatch):
+    """只观察 1-2 天不下结论。"""
+    import advisor
+    monkeypatch.setattr(advisor, "VERSIONS_DIR", tmp_path / "versions")
+    monkeypatch.setattr(advisor, "STATS_PATH", tmp_path / "stats.json")
+    monkeypatch.setattr(advisor, "CHANGELOG", tmp_path / "CHANGELOG.md")
+    monkeypatch.setattr(advisor, "MIN_DAYS_FOR_VERSION_VERDICT", 3)
+    monkeypatch.setattr(advisor, "REGRESSION_DROP_PP_THRESHOLD", 2.0)
+    (tmp_path / "versions").mkdir()
+    (tmp_path / "versions" / "v001_2026-04-25.md").write_text("p1", encoding="utf-8")
+    (tmp_path / "versions" / "v002_2026-04-29.md").write_text("p2", encoding="utf-8")
+    (tmp_path / "CHANGELOG.md").write_text("", encoding="utf-8")
+    # v002 才 2 天数据
+    (tmp_path / "stats.json").write_text(json.dumps([
+        {"date": "2026-04-25", "total": 100, "converted": 22, "rate": 0.22, "bad": 0},
+        {"date": "2026-04-26", "total": 100, "converted": 22, "rate": 0.22, "bad": 0},
+        {"date": "2026-04-27", "total": 100, "converted": 22, "rate": 0.22, "bad": 0},
+        {"date": "2026-04-29", "total": 100, "converted": 10, "rate": 0.10, "bad": 0},
+        {"date": "2026-04-30", "total": 100, "converted": 10, "rate": 0.10, "bad": 0},
+    ]), encoding="utf-8")
+    assert advisor.latest_version_regression_warning() is None
+
+
 def test_parse_feedback_structured_format():
     import advisor
     text = """## 反馈 — 2026-04-30 18:00

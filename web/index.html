@@ -111,6 +111,50 @@
   .diff-line-del { background: rgba(239, 68, 68, 0.15); border-left: 3px solid var(--error); }
   .diff-line-ctx { color: var(--muted); }
   pre.diff-pane { font-family: "JetBrains Mono", "Cascadia Mono", "Consolas", monospace; font-size: 12px; line-height: 1.5; }
+  /* ML 训练映射区独有的衬线印刷品风格 */
+  .philosophy-title {
+    font-family: "Cormorant Garamond", "Source Serif Pro", "Times New Roman", "Songti SC", serif;
+    font-style: italic;
+    font-weight: 400;
+    letter-spacing: 0.02em;
+  }
+  .philosophy-row {
+    display: grid;
+    grid-template-columns: 1fr 28px 1fr;
+    align-items: center;
+    gap: 16px;
+    padding: 14px 0;
+    border-top: 1px solid rgba(148, 163, 184, 0.08);
+    transition: background 0.25s;
+  }
+  .philosophy-row:hover { background: rgba(6, 182, 212, 0.025); }
+  .philosophy-row:first-child { border-top: 0; }
+  .philosophy-ml {
+    text-align: right;
+    color: #94a3b8;
+    font-family: "Cormorant Garamond", "Times New Roman", serif;
+    font-size: 18px;
+  }
+  .philosophy-arrow {
+    text-align: center;
+    color: rgba(6, 182, 212, 0.6);
+    font-size: 16px;
+    letter-spacing: -1px;
+  }
+  .philosophy-our {
+    color: #cbd5e1;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  .philosophy-our code, .philosophy-our em {
+    color: var(--accent);
+    font-style: normal;
+    font-family: "JetBrains Mono", "Cascadia Mono", "Consolas", monospace;
+    font-size: 12.5px;
+    background: rgba(6, 182, 212, 0.08);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
   /* 滚动条 */
   ::-webkit-scrollbar { width: 8px; height: 8px; }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -121,6 +165,24 @@
 <body class="grid-bg">
 
 <div class="relative z-10 max-w-7xl mx-auto px-6 py-8 space-y-8">
+
+  <!-- 留资率回归告警（仅在触发时显示） -->
+  <div id="regression-warning" class="hidden">
+    <div class="rounded-2xl border border-red-500/40 bg-red-500/10 p-5 backdrop-blur">
+      <div class="flex items-start gap-4">
+        <div class="text-3xl">⚠️</div>
+        <div class="flex-1 space-y-1">
+          <div class="text-red-300 font-bold text-lg">留资率下跌警告</div>
+          <div class="text-sm text-red-200/90" id="rw-detail">—</div>
+          <div class="text-xs text-red-300/70" id="rw-modules">—</div>
+        </div>
+        <button id="rw-rollback-btn" onclick="warningRollback()"
+                class="px-4 py-2 rounded-lg bg-red-500/20 border border-red-400/60 text-red-200 hover:bg-red-500/30 text-sm whitespace-nowrap">
+          立即回滚 + 推 Dify
+        </button>
+      </div>
+    </div>
+  </div>
 
   <!-- Header -->
   <header class="flex items-center justify-between">
@@ -311,6 +373,17 @@
     </div>
   </section>
 
+  <!-- 版本效果追踪（留资率反馈环） -->
+  <section class="glass p-5">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="text-sm text-slate-400 uppercase tracking-wider">版本效果追踪 — 留资率反馈环</h3>
+      <span class="text-xs text-slate-500">每个版本在其活跃期内的真实留资率均值，主管 LLM 下次优化时会读到</span>
+    </div>
+    <div id="version-effect-list" class="space-y-2">
+      <div class="text-slate-500 text-sm">加载中...</div>
+    </div>
+  </section>
+
   <!-- 版本时间线 -->
   <section class="glass p-5">
     <h3 class="text-sm text-slate-400 uppercase tracking-wider mb-4">版本时间线</h3>
@@ -336,6 +409,73 @@
         <tr><td colspan="5" class="py-3 text-slate-500">加载中...</td></tr>
       </tbody>
     </table>
+  </section>
+
+  <!-- 设计哲学：把 prompt 工程当作模型训练 -->
+  <section class="glass p-8 mt-8">
+    <div class="text-center mb-6">
+      <div class="text-xs text-slate-500 uppercase tracking-[0.3em] mb-2">设计哲学</div>
+      <h2 class="philosophy-title text-3xl text-slate-200">
+        Prompt engineering, framed as iterative training.
+      </h2>
+      <p class="text-sm text-slate-500 mt-3 max-w-2xl mx-auto leading-relaxed">
+        飞轮的每一个组件都对应模型训练的某一环节——不是巧合，而是刻意。
+        这样 prompt 的演进可以像训练 loss 曲线一样，被观测、被回滚、被复盘。
+      </p>
+    </div>
+
+    <div class="max-w-4xl mx-auto mt-8">
+      <div class="philosophy-row">
+        <div class="philosophy-ml">Training Data</div>
+        <div class="philosophy-arrow">≡</div>
+        <div class="philosophy-our"><code>cases.json[optimize]</code> · 每天从生产对话新增</div>
+      </div>
+      <div class="philosophy-row">
+        <div class="philosophy-ml">Validation Set</div>
+        <div class="philosophy-arrow">≡</div>
+        <div class="philosophy-our"><code>cases.json[holdout]</code> · 随机 20% · 防过拟合</div>
+      </div>
+      <div class="philosophy-row">
+        <div class="philosophy-ml">Test Set</div>
+        <div class="philosophy-arrow">≡</div>
+        <div class="philosophy-our"><code>regression_set.json</code> 合成 + <code>regression_set_real.json</code> 真实 · 守底线</div>
+      </div>
+      <div class="philosophy-row">
+        <div class="philosophy-ml">Loss Function</div>
+        <div class="philosophy-arrow">≡</div>
+        <div class="philosophy-our">三阶段通过率：<em>违禁词检测</em> + <em>语义级 LLM 判定</em> + <em>期望行为判定</em></div>
+      </div>
+      <div class="philosophy-row">
+        <div class="philosophy-ml">Optimizer</div>
+        <div class="philosophy-arrow">≡</div>
+        <div class="philosophy-our">主管 LLM 黑盒重写 prompt（非梯度，但同样响应 loss 信号）</div>
+      </div>
+      <div class="philosophy-row">
+        <div class="philosophy-ml">Training Step</div>
+        <div class="philosophy-arrow">≡</div>
+        <div class="philosophy-our"><code>advisor</code> 每天跑一次，每次内部最多 5 轮迭代</div>
+      </div>
+      <div class="philosophy-row">
+        <div class="philosophy-ml">Early Stopping</div>
+        <div class="philosophy-arrow">≡</div>
+        <div class="philosophy-our">三阶段全过 → 入 pending；用尽 5 轮 → failed，留到明天接力</div>
+      </div>
+      <div class="philosophy-row">
+        <div class="philosophy-ml">Backpropagation</div>
+        <div class="philosophy-arrow">≡</div>
+        <div class="philosophy-our">失败 case 喂回下轮 <code>generate_candidate</code>："这次必须修复 X"</div>
+      </div>
+      <div class="philosophy-row">
+        <div class="philosophy-ml">Replay Buffer</div>
+        <div class="philosophy-arrow">≡</div>
+        <div class="philosophy-our"><code>cases.json</code> 持久化，跨天累积</div>
+      </div>
+      <div class="philosophy-row">
+        <div class="philosophy-ml">Reward Signal</div>
+        <div class="philosophy-arrow">≡</div>
+        <div class="philosophy-our">真实留资率（按版本聚合），通过<em>留资率反馈环</em>注入主管 LLM</div>
+      </div>
+    </div>
   </section>
 
   <footer class="text-center text-xs text-slate-600 py-6">
@@ -619,21 +759,25 @@ function renderFlywheel(activeStageId, metrics) {
 let charts = {};
 
 async function loadAll() {
-  const [status, today, history, advHist, versions] = await Promise.all([
+  const [status, today, history, advHist, versions, vConv, warning] = await Promise.all([
     fetch("/api/status").then(r => r.json()),
     fetch("/api/today").then(r => r.json()),
     fetch("/api/history?days=30").then(r => r.json()),
     fetch("/api/advisor-history?days=7").then(r => r.json()),
     fetch("/api/versions").then(r => r.json()),
+    fetch("/api/versions/conversion").then(r => r.json()),
+    fetch("/api/regression-warning").then(r => r.json()),
   ]);
 
   renderHeader(status);
+  renderRegressionWarning(warning);
   renderKPIs(status, today, history);
   renderFlywheelFromData(status, today);
   renderTrendCharts(history);
   renderTopViolations(today);
   renderTestSet(status);
   renderPending(status);
+  renderVersionEffects(vConv);
   renderTimeline(versions);
   renderAdvisorTable(advHist);
   document.getElementById("last-refresh").textContent = "刚刚同步";
@@ -872,6 +1016,103 @@ function renderPending(status) {
       <button onclick="openDiff('${p.version}')" class="px-4 py-2 rounded-lg bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/30 text-sm">查看 diff</button>
     </div>
   `).join("");
+}
+
+// ── 留资率反馈环 ───────────────────────────────────────────────
+let pendingRollbackTarget = null;
+
+function renderRegressionWarning(w) {
+  const el = document.getElementById("regression-warning");
+  if (!w || !w.version) {
+    el.classList.add("hidden");
+    pendingRollbackTarget = null;
+    return;
+  }
+  const detail = `<strong class="text-red-200">${w.version}</strong> 上线 ${w.days} 天，留资率 ${(w.cur_rate*100).toFixed(1)}%，` +
+                 `比 <strong>${w.prev_version}</strong>（${(w.prev_rate*100).toFixed(1)}%）下降 <strong>${w.delta_pp.toFixed(1)}pp</strong>`;
+  document.getElementById("rw-detail").innerHTML = detail;
+  document.getElementById("rw-modules").textContent =
+    `${w.version} 改了 [${w.cur_module || '?'}]，建议回滚到 ${w.prev_version}（[${w.prev_module || '?'}]）`;
+  document.getElementById("rw-rollback-btn").textContent = `立即回滚到 ${w.prev_version} + 推 Dify`;
+  pendingRollbackTarget = w.prev_version;
+  el.classList.remove("hidden");
+}
+
+async function warningRollback() {
+  if (!pendingRollbackTarget) return;
+  if (!confirm(`确认回滚到 ${pendingRollbackTarget} 并推送 Dify 生产？`)) return;
+  const r = await fetch(`/api/rollback/${pendingRollbackTarget}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ push: true }),
+  });
+  if (!r.ok) {
+    alert("回滚失败：" + await r.text());
+    return;
+  }
+  const data = await r.json();
+  if (!data.pushed) {
+    alert(`本地已回滚到 ${pendingRollbackTarget}，但 Dify 推送失败：${data.push_error || ""}`);
+  } else {
+    alert(`已回滚 ${pendingRollbackTarget} 并同步到 Dify`);
+  }
+  await loadAll();
+}
+
+function renderVersionEffects(stats) {
+  const wrap = document.getElementById("version-effect-list");
+  if (!stats || !stats.length) {
+    wrap.innerHTML = '<div class="text-slate-500 text-sm">尚无版本数据</div>';
+    return;
+  }
+  // 倒序：最新在上
+  const ordered = [...stats].reverse();
+  wrap.innerHTML = ordered.map(v => renderVersionEffectRow(v)).join("");
+}
+
+function renderVersionEffectRow(v) {
+  const cur = v.is_current;
+  const noData = !v.total_convs;
+  let deltaHtml = "";
+  if (v.delta_pp !== null && v.delta_pp !== undefined) {
+    if (v.delta_pp > 0) {
+      deltaHtml = `<span class="text-emerald-400">↑ +${v.delta_pp.toFixed(1)}pp</span>`;
+    } else if (v.delta_pp < 0) {
+      deltaHtml = `<span class="text-red-400">↓ ${v.delta_pp.toFixed(1)}pp</span>`;
+    } else {
+      deltaHtml = `<span class="text-slate-500">→ 0</span>`;
+    }
+  } else if (!noData) {
+    deltaHtml = `<span class="text-slate-500">基线</span>`;
+  }
+
+  const rateHtml = noData
+    ? `<span class="text-slate-500 text-sm">暂无数据</span>`
+    : `<span class="text-2xl font-mono ${cur ? 'text-cyan-300' : 'text-slate-200'}">${(v.avg_rate*100).toFixed(1)}%</span>`;
+
+  const period = v.is_current
+    ? `${v.publish_date} 起 · 当前`
+    : `${v.publish_date} → ${v.end_date}`;
+
+  return `
+    <div class="flex items-center gap-4 p-3 rounded-lg ${cur ? 'bg-cyan-500/5 border border-cyan-500/20' : 'border border-slate-800/60'}">
+      <div class="w-16 text-center">
+        <div class="font-mono text-lg ${cur ? 'text-cyan-300' : 'text-slate-300'}">${escapeHtml(v.version)}</div>
+        ${cur ? '<div class="text-[10px] text-cyan-400 uppercase tracking-wider">在跑</div>' : ''}
+      </div>
+      <div class="flex-1 min-w-0">
+        <div class="text-xs text-slate-500">${escapeHtml(period)} · ${v.days} 天 · ${v.converted}/${v.total_convs}</div>
+        <div class="text-sm text-slate-300 truncate" title="${escapeHtml(v.module || '')}">改动模块：${escapeHtml(v.module || '—')}</div>
+      </div>
+      <div class="text-right w-32">
+        ${rateHtml}
+      </div>
+      <div class="w-24 text-right text-sm">${deltaHtml}</div>
+      <button onclick="openVersion('${v.version}')"
+              class="px-3 py-1.5 rounded border border-slate-700 text-xs text-slate-300 hover:bg-slate-800">
+        详情
+      </button>
+    </div>`;
 }
 
 function renderTimeline(versions) {

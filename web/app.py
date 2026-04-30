@@ -113,6 +113,18 @@ def api_versions():
     return out
 
 
+@app.get("/api/versions/conversion")
+def api_versions_conversion():
+    """每个版本在其活跃期内的留资率均值 + pp 差。留资率反馈环的核心数据。"""
+    return adv.get_version_conversion_stats()
+
+
+@app.get("/api/regression-warning")
+def api_regression_warning():
+    """如果最新版本上线后留资率明显下降，返回告警；否则空对象。"""
+    return adv.latest_version_regression_warning() or {}
+
+
 @app.get("/api/pending/{version}")
 def api_pending_diff(version: str):
     """获取 pending 候选 + 当前 prompt + 元数据，给前端做 diff。"""
