@@ -161,6 +161,25 @@ python advisor.py --approve v001
 python advisor.py --rollback v001
 ```
 
+### Web 仪表盘（飞轮可视化）
+
+```bash
+# 启动（默认 0.0.0.0:8080，内网随便访问）
+python web/app.py
+# 或
+uvicorn web.app:app --host 0.0.0.0 --port 8080
+```
+
+浏览器打开 `http://服务器IP:8080`：
+
+- 中央 SVG 飞轮图，今日活跃节点高亮，弧线粒子流动
+- 4 张 KPI 卡（留资率 / 回归通过率 / 已发布版本 / 待审候选）
+- 近 30 天留资率折线图 + 劣质对话柱状图
+- 今日 Top 违规排行
+- 待审候选一键 diff + 批准/驳回（替代 `--approve` 命令行）
+- 版本时间线 + 近 7 日 advisor 行动表
+- 每 60 秒自动刷新
+
 ### 测试
 
 ```bash

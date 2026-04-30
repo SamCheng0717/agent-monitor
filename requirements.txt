@@ -3,3 +3,5 @@ python-dotenv
 pymysql
 requests
 pytest
+fastapi
+uvicorn
