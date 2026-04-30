@@ -53,6 +53,13 @@
 │   次日 monitor 验证修复 / 发现新失败 ──┐                          │
 │                                        │                          │
 │         ↻ 循环 ───────────────────────┘                          │
+│                                                                   │
+│   ┌─────────────┐                                                 │
+│   │ web/app.py  │  内网仪表盘（FastAPI）：实时可视化整个飞轮      │
+│   └─────────────┘  · SVG 飞轮活跃节点高亮 + 粒子流动              │
+│                    · 30 天留资率/劣质数趋势                       │
+│                    · 一键 diff + 批准/驳回 pending                │
+│                    · 版本时间线 + advisor 行动表                  │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
@@ -100,7 +107,18 @@ prompt 修改后，scoring 会自动适配新规则，不需要同步代码。
 - **版本管理**：v000-vNNN 全量归档到 `prompts/versions/`，CHANGELOG.md 记录每次变更的违规规则、影响、三阶段通过率
 - **一键回滚**：`python advisor.py --rollback v003`
 
-### 5. 每日记录
+### 5. Web 仪表盘 — 飞轮可视化
+
+`web/app.py` 起一个 FastAPI 服务（内网访问，无需鉴权），单页 SVG 仪表盘：
+
+- 中央 SVG 飞轮，7 个节点环形分布，今日活跃节点脉冲发光，弧线粒子流动指示数据流向
+- 4 张 KPI 卡（留资率含涨跌箭头 / 回归通过率 / 当前版本 / 待审候选数）
+- Chart.js 折线图：30 天留资率趋势 + 劣质对话柱状图
+- Top 违规进度条：今日哪些规则被违反最多
+- 一键 diff 弹窗 + Approve/Reject 按钮，替代 `--approve` 命令行
+- 每 60 秒自动刷新
+
+### 6. 每日记录
 
 `reports/advisor/<date>.json` 追加每次运行的状态：
 
@@ -164,19 +182,20 @@ python advisor.py --rollback v001
 ### Web 仪表盘（飞轮可视化）
 
 ```bash
-# 启动（默认 0.0.0.0:8080，内网随便访问）
+# 启动（默认 0.0.0.0:8080，内网随便访问；端口冲突可换 8090 等）
 python web/app.py
-# 或
-uvicorn web.app:app --host 0.0.0.0 --port 8080
+# 或自定义端口/守护
+uvicorn web.app:app --host 0.0.0.0 --port 8090
+nohup uvicorn web.app:app --host 0.0.0.0 --port 8090 > logs/web.log 2>&1 &
 ```
 
-浏览器打开 `http://服务器IP:8080`：
+浏览器打开 `http://服务器IP:8090`，看到：
 
-- 中央 SVG 飞轮图，今日活跃节点高亮，弧线粒子流动
-- 4 张 KPI 卡（留资率 / 回归通过率 / 已发布版本 / 待审候选）
-- 近 30 天留资率折线图 + 劣质对话柱状图
-- 今日 Top 违规排行
-- 待审候选一键 diff + 批准/驳回（替代 `--approve` 命令行）
+- 中央 SVG 飞轮，活跃节点脉冲，弧线粒子流动
+- 4 张 KPI 卡（含趋势箭头）
+- 30 天折线图 + 柱状图
+- Top 违规排行
+- 一键 diff + 批准/驳回 pending（替代 `--approve` 命令行）
 - 版本时间线 + 近 7 日 advisor 行动表
 - 每 60 秒自动刷新
 
@@ -187,7 +206,7 @@ pip install pytest
 python -m pytest tests/ -v
 ```
 
-39 条测试覆盖：Dify API 客户端、留资检测、质量评分、统计持久化、日报生成、周报生成、用例提取（JSON + Markdown 双路径）、多轮回放、Dify 变量校验、pending/approve 流程、回归集加载等。
+40 条测试覆盖：Dify API 客户端、留资检测、质量评分、统计持久化、日报生成、周报生成、用例提取（JSON + Markdown 双路径）、多轮回放、Dify 变量校验、pending/approve 流程、回归集加载、status 仪表盘等。
 
 ---
 
@@ -203,7 +222,14 @@ python -m pytest tests/ -v
 30 2 * * * cd /www/wwwroot/agent-monitor && venv/bin/python advisor.py >> logs/advisor.log 2>&1
 ```
 
-人工早晨上班看钉钉通知，diff 一下 pending 文件，`--approve` 即可上线。
+Web 仪表盘常驻：
+
+```bash
+nohup uvicorn web.app:app --host 0.0.0.0 --port 8090 > logs/web.log 2>&1 &
+# 或写成 systemd unit 更优雅
+```
+
+人工早晨上班，浏览器打开仪表盘看待审候选，点 diff → 批准/驳回 即可。
 
 ---
 
@@ -213,6 +239,9 @@ python -m pytest tests/ -v
 agent-monitor/
 ├── monitor.py               # 拉取 Dify 对话 + 三 LLM 评分 + 生成日报
 ├── advisor.py               # 主管 Agent + 三阶段闸门 + 版本管理 + pending/approve
+├── web/
+│   ├── app.py               # FastAPI 后端，6 个 API 端点
+│   └── index.html           # 单页前端：SVG 飞轮 + Tailwind + Chart.js
 ├── tests/
 │   ├── regression_set.json  # 人工维护的稳定回归测试集（20 条）
 │   ├── cases.json           # 自动累积的生产失败用例（飞轮训练集）
@@ -245,8 +274,9 @@ agent-monitor/
 | 对话采集 | Dify App API |
 | 群成员名单 | OceanBase / MySQL |
 | 通知 | 钉钉自定义机器人（HMAC-SHA256 签名） |
+| Web 仪表盘 | FastAPI + Tailwind + Chart.js + 原生 SVG |
 | 调度 | cron |
-| 测试 | pytest（39 条全绿） |
+| 测试 | pytest（40 条全绿） |
 
 ---
 
