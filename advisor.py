@@ -521,12 +521,25 @@ def generate_candidate(
             lines.append(f"- {f['id']}: {f['reason']}")
         failure_section = "\n".join(lines)
 
-    # 反馈支持多条用空行分隔，每条可能是多行（含粘贴的对话片段+人工观察）
-    fb_clean = (feedback_text or "").strip()
-    if fb_clean:
-        entries = re.split(r"\n\s*\n+", fb_clean)
-        rendered = "\n\n".join(f"反馈 {i+1}:\n{e.strip()}" for i, e in enumerate(entries) if e.strip())
-        feedback_for_prompt = rendered[:5000]
+    # 反馈用结构化字段（原对话/问题/期望改法/规则修改建议）渲染给主管 LLM
+    entries = parse_feedback_entries(feedback_text or "")
+    if entries:
+        rendered_blocks = []
+        for i, e in enumerate(entries, 1):
+            block = [f"反馈 {i}（{e.get('timestamp','')}）"]
+            if e.get("rule_change"):
+                block.append(f"  · 涉及规则：{e['rule_change']}")
+            if e.get("problem"):
+                block.append(f"  · 问题：{e['problem']}")
+            if e.get("dialogue"):
+                dlg = e["dialogue"]
+                if len(dlg) > 600:
+                    dlg = dlg[:600] + "...[省略]"
+                block.append(f"  · 对话片段：\n    " + dlg.replace("\n", "\n    "))
+            if e.get("suggestion"):
+                block.append(f"  · 期望改法：{e['suggestion']}")
+            rendered_blocks.append("\n".join(block))
+        feedback_for_prompt = "\n\n".join(rendered_blocks)[:5000]
     else:
         feedback_for_prompt = "（无）"
 
@@ -859,6 +872,87 @@ def promote_regression() -> tuple[int, Path]:
 
     added = _promote_by_sources(selections)
     return added, REGRESSION_REAL_PATH
+
+
+_FEEDBACK_FIELDS = {
+    "dialogue":    "原对话",
+    "problem":     "问题",
+    "suggestion":  "期望改法",
+    "rule_change": "规则修改建议",
+}
+
+
+def _parse_feedback_chunk(chunk: str) -> dict:
+    entry = {"timestamp": "", "dialogue": "", "problem": "", "suggestion": "", "rule_change": ""}
+    ts = re.search(r"^##\s*反馈\s*[—\-]\s*(.+?)$", chunk, re.MULTILINE)
+    if ts:
+        entry["timestamp"] = ts.group(1).strip()
+
+    # 抓所有 **字段名**: 段直到下一个 **字段名** 或末尾
+    label_alt = "|".join(re.escape(v) for v in _FEEDBACK_FIELDS.values())
+    pat = rf"\*\*({label_alt})\*\*\s*:?\s*([\s\S]*?)(?=\n\*\*(?:{label_alt})\*\*|\Z)"
+    found = False
+    for m in re.finditer(pat, chunk):
+        label, value = m.group(1), m.group(2).strip()
+        for key, label_zh in _FEEDBACK_FIELDS.items():
+            if label == label_zh:
+                entry[key] = value
+                found = True
+                break
+
+    if not found:
+        # 兼容旧自由文本：整段塞 problem
+        body = re.sub(r"^##\s*反馈\s*[—\-].*$", "", chunk, count=1, flags=re.MULTILINE).strip()
+        entry["problem"] = body
+        if not entry["timestamp"]:
+            entry["timestamp"] = datetime.date.today().isoformat()
+    return entry
+
+
+def parse_feedback_entries(text: str) -> list[dict]:
+    """把 feedback/pending.md 解析成结构化列表 [{timestamp, dialogue, problem, suggestion, rule_change}]。
+    新格式：## 反馈 — TS / **原对话** / **问题** / **期望改法** / **规则修改建议** / 用 --- 分隔。
+    旧格式（自由文本）：单条目，整段塞 problem 字段。"""
+    text = (text or "").strip()
+    if not text:
+        return []
+    chunks = re.split(r"\n\s*---+\s*\n", text)
+    out = []
+    for chunk in chunks:
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        e = _parse_feedback_chunk(chunk)
+        if any(e[k] for k in ("dialogue", "problem", "suggestion", "rule_change")):
+            out.append(e)
+    return out
+
+
+def serialize_feedback_entries(entries: list[dict]) -> str:
+    if not entries:
+        return ""
+    parts = []
+    for e in entries:
+        ts = (e.get("timestamp") or "").strip() or datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        block = [f"## 反馈 — {ts}", ""]
+        if (e.get("dialogue") or "").strip():
+            block.append("**原对话**:")
+            block.append(e["dialogue"].strip())
+            block.append("")
+        if (e.get("problem") or "").strip():
+            block.append("**问题**:")
+            block.append(e["problem"].strip())
+            block.append("")
+        if (e.get("suggestion") or "").strip():
+            block.append("**期望改法**:")
+            block.append(e["suggestion"].strip())
+            block.append("")
+        if (e.get("rule_change") or "").strip():
+            block.append("**规则修改建议**:")
+            block.append(e["rule_change"].strip())
+            block.append("")
+        parts.append("\n".join(block).rstrip())
+    return "\n\n---\n\n".join(parts) + "\n"
 
 
 def _record_advisor_log(date: str, payload: dict) -> Path:

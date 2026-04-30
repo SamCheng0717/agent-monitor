@@ -184,21 +184,29 @@ def api_run_regression():
 
 @app.get("/api/feedback")
 def api_get_feedback():
-    """读 feedback/pending.md 内容 + 修改时间。"""
+    """结构化读取：每条反馈含 timestamp/dialogue/problem/suggestion/rule_change。
+    旧自由文本会作为单条 entry（problem 字段）返回，自动迁移。"""
     if not adv.FEEDBACK_PATH.exists():
-        return {"content": "", "mtime": None}
+        return {"entries": [], "mtime": None}
+    text = adv.FEEDBACK_PATH.read_text(encoding="utf-8")
     return {
-        "content": adv.FEEDBACK_PATH.read_text(encoding="utf-8"),
+        "entries": adv.parse_feedback_entries(text),
         "mtime": datetime.datetime.fromtimestamp(adv.FEEDBACK_PATH.stat().st_mtime).isoformat(timespec="seconds"),
     }
 
 
-@app.post("/api/feedback")
+@app.put("/api/feedback")
 def api_set_feedback(payload: dict = Body(...)):
-    content = payload.get("content", "")
+    """整组替换：entries=[{timestamp, dialogue, problem, suggestion, rule_change}]。
+    每条至少要 problem 非空，否则跳过。"""
+    entries = payload.get("entries") or []
+    if not isinstance(entries, list):
+        raise HTTPException(400, "entries must be a list")
+    valid = [e for e in entries if isinstance(e, dict) and (e.get("problem") or "").strip()]
+    text = adv.serialize_feedback_entries(valid)
     adv.FEEDBACK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    adv.FEEDBACK_PATH.write_text(content, encoding="utf-8")
-    return {"ok": True, "size": len(content)}
+    adv.FEEDBACK_PATH.write_text(text, encoding="utf-8")
+    return {"ok": True, "count": len(valid), "skipped": len(entries) - len(valid)}
 
 
 @app.get("/api/version/{version}")

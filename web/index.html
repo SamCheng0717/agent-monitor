@@ -255,30 +255,27 @@
   <!-- 人工反馈输入 -->
   <section class="glass p-5">
     <div class="flex items-center justify-between mb-3">
-      <h3 class="text-sm text-slate-400 uppercase tracking-wider">人工反馈 — feedback/pending.md</h3>
+      <h3 class="text-sm text-slate-400 uppercase tracking-wider">人工反馈 — 结构化模板</h3>
       <span class="text-xs text-slate-500" id="feedback-mtime">—</span>
     </div>
-    <p class="text-xs text-slate-500 mb-2">
-      整个文本会作为一段反馈喂给主管 LLM。<strong>多条反馈之间用空行（按两次回车）分隔</strong>，
-      可以直接粘贴对话片段加你的观察。advisor 成功发布后自动清空。
+    <p class="text-xs text-slate-500 mb-3 leading-relaxed">
+      字段对齐主管 LLM 的推理结构（规则 / 证据 / 影响 / 建议），让 AI 改 prompt 时无需猜测。
+      <strong class="text-slate-400">只「问题」必填</strong>，其他三个填得越具体下次发布的 candidate 越精准。
+      advisor 成功发布后自动清空。
     </p>
-    <textarea id="feedback-input" rows="10"
-              oninput="updateFeedbackCount()"
-              class="w-full bg-slate-900/60 border border-slate-700 rounded-lg p-3 font-mono text-sm text-slate-200 focus:outline-none focus:border-cyan-500/60"
-              placeholder="2026-04-30 客服：顾客已主动说想加微信，AI 反复要微信号 (粘贴对话片段)
-[顾客] 可以加一下客服微信详细咨询吗
-[AI] 方便再留一个微信号吗？客服会直接加您
-[AI] 请您留个微信号，客服这边会尽快联系您
-观察：顾客已表达加微信意愿，AI 应直接确认收到，绝不再要
-
-(空一行分隔下一条反馈)
-2026-04-30 客服：丽珠兰报具体数字 (3400/4900) 是错的，应给区间或引导留资"></textarea>
-    <div class="flex items-center justify-between mt-2">
-      <span class="text-xs text-slate-500" id="feedback-count">0 字 / 0 条</span>
-      <button onclick="saveFeedback()" id="feedback-save-btn"
-              class="px-4 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/30 text-sm">
-        保存
+    <div id="feedback-list" class="space-y-3"></div>
+    <div class="flex items-center justify-between mt-3">
+      <button onclick="addFeedback()"
+              class="px-3 py-1.5 rounded-lg border border-slate-600 text-slate-300 hover:bg-slate-800 text-sm">
+        + 添加反馈
       </button>
+      <div class="flex items-center gap-3">
+        <span class="text-xs text-slate-500" id="feedback-summary">—</span>
+        <button onclick="saveAllFeedback()" id="feedback-save-btn"
+                class="px-4 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/30 text-sm">
+          保存全部
+        </button>
+      </div>
     </div>
   </section>
 
@@ -1073,39 +1070,120 @@ async function promoteSelected() {
 function openHelp()  { document.getElementById("help-modal").classList.remove("hidden"); }
 function closeHelp() { document.getElementById("help-modal").classList.add("hidden"); }
 
-// ── 反馈输入 ────────────────────────────────────────────────────
+// ── 反馈输入（结构化）────────────────────────────────────────
+let feedbackEntries = [];
+
 async function loadFeedback() {
   const r = await fetch("/api/feedback").then(r => r.json());
-  document.getElementById("feedback-input").value = r.content || "";
+  feedbackEntries = (r.entries || []).map(e => ({
+    timestamp:   e.timestamp   || "",
+    dialogue:    e.dialogue    || "",
+    problem:     e.problem     || "",
+    suggestion:  e.suggestion  || "",
+    rule_change: e.rule_change || "",
+  }));
   document.getElementById("feedback-mtime").textContent =
-    r.mtime ? `上次保存：${r.mtime}` : "（空）";
-  updateFeedbackCount();
+    r.mtime ? `上次保存：${r.mtime}` : "";
+  renderFeedbackList();
 }
 
-function updateFeedbackCount() {
-  const t = document.getElementById("feedback-input").value;
-  const chars = t.length;
-  const entries = t.trim() ? t.trim().split(/\n\s*\n+/).length : 0;
-  document.getElementById("feedback-count").textContent = `${chars} 字 / ${entries} 条反馈`;
+function renderFeedbackList() {
+  const wrap = document.getElementById("feedback-list");
+  const summary = document.getElementById("feedback-summary");
+  if (!feedbackEntries.length) {
+    wrap.innerHTML = '<div class="text-slate-500 text-sm py-3">暂无反馈，点击下方「+ 添加反馈」记录今日观察</div>';
+    summary.textContent = "0 条反馈";
+    return;
+  }
+  wrap.innerHTML = feedbackEntries.map((e, i) => renderFeedbackCard(e, i)).join("");
+  summary.textContent = `${feedbackEntries.length} 条反馈`;
 }
 
-async function saveFeedback() {
+function renderFeedbackCard(e, i) {
+  const f = (txt) => escapeHtml(txt || "");
+  return `
+    <div class="border border-slate-700 rounded-lg p-4 bg-slate-900/40">
+      <div class="flex items-center justify-between mb-3">
+        <span class="text-xs text-slate-500 font-mono">反馈 ${i+1}${e.timestamp ? ' · ' + escapeHtml(e.timestamp) : ''}</span>
+        <button onclick="removeFeedback(${i})" title="删除"
+                class="text-slate-500 hover:text-red-400 text-xl leading-none px-2">&times;</button>
+      </div>
+      <div class="space-y-3">
+        <div>
+          <label class="text-xs text-slate-400 flex items-center gap-2">
+            <span>原对话</span><span class="text-slate-600">选填，粘贴顾客原话和 AI 回复</span>
+          </label>
+          <textarea oninput="updateFeedback(${i}, 'dialogue', this.value)" rows="3"
+                    class="w-full bg-slate-950/50 border border-slate-700 rounded p-2 text-xs font-mono mt-1 focus:outline-none focus:border-cyan-500/60"
+                    placeholder="[顾客] xxx&#10;[AI] yyy">${f(e.dialogue)}</textarea>
+        </div>
+        <div>
+          <label class="text-xs text-slate-400 flex items-center gap-2">
+            <span>问题</span><span class="text-amber-400">必填</span>
+          </label>
+          <textarea oninput="updateFeedback(${i}, 'problem', this.value)" rows="2"
+                    class="w-full bg-slate-950/50 border border-slate-700 rounded p-2 text-sm mt-1 focus:outline-none focus:border-cyan-500/60"
+                    placeholder="一句话说清楚哪里不对">${f(e.problem)}</textarea>
+        </div>
+        <div>
+          <label class="text-xs text-slate-400 flex items-center gap-2">
+            <span>期望改法</span><span class="text-slate-600">选填，给具体话术示例胜过抽象描述</span>
+          </label>
+          <textarea oninput="updateFeedback(${i}, 'suggestion', this.value)" rows="2"
+                    class="w-full bg-slate-950/50 border border-slate-700 rounded p-2 text-sm mt-1 focus:outline-none focus:border-cyan-500/60"
+                    placeholder='应该回："亲爱的，咱们这有的呢～ 留个微信，客服把详细方案发给您参考~"'>${f(e.suggestion)}</textarea>
+        </div>
+        <div>
+          <label class="text-xs text-slate-400 flex items-center gap-2">
+            <span>规则修改建议</span><span class="text-cyan-400">填了能让 AI 改 prompt 准 10 倍</span>
+          </label>
+          <textarea oninput="updateFeedback(${i}, 'rule_change', this.value)" rows="2"
+                    class="w-full bg-slate-950/50 border border-slate-700 rounded p-2 text-sm mt-1 focus:outline-none focus:border-cyan-500/60"
+                    placeholder='身份规则里"禁止对未收录品牌确认有/没有"那条改为...'>${f(e.rule_change)}</textarea>
+        </div>
+      </div>
+    </div>`;
+}
+
+function addFeedback() {
+  const ts = new Date().toISOString().slice(0, 16).replace("T", " ");
+  feedbackEntries.push({ timestamp: ts, dialogue: "", problem: "", suggestion: "", rule_change: "" });
+  renderFeedbackList();
+}
+
+function removeFeedback(i) {
+  if (!confirm(`删除反馈 ${i+1}？`)) return;
+  feedbackEntries.splice(i, 1);
+  renderFeedbackList();
+}
+
+function updateFeedback(i, field, value) {
+  if (feedbackEntries[i]) feedbackEntries[i][field] = value;
+  // 不重渲染，避免丢失光标位置
+}
+
+async function saveAllFeedback() {
   const btn = document.getElementById("feedback-save-btn");
-  const content = document.getElementById("feedback-input").value;
+  // 校验必填
+  const invalid = feedbackEntries.findIndex(e => !(e.problem || "").trim());
+  if (invalid >= 0) {
+    alert(`反馈 ${invalid + 1} 缺少「问题」字段（必填）`);
+    return;
+  }
   btn.disabled = true; btn.textContent = "保存中...";
   try {
     const r = await fetch("/api/feedback", {
-      method: "POST",
+      method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({ entries: feedbackEntries }),
     });
     if (!r.ok) throw new Error(await r.text());
     await loadFeedback();
     btn.textContent = "已保存 ✓";
-    setTimeout(() => { btn.textContent = "保存"; btn.disabled = false; }, 1500);
+    setTimeout(() => { btn.textContent = "保存全部"; btn.disabled = false; }, 1500);
   } catch (e) {
     alert("保存失败：" + e.message);
-    btn.textContent = "保存"; btn.disabled = false;
+    btn.textContent = "保存全部"; btn.disabled = false;
   }
 }
 

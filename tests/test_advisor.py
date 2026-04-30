@@ -598,6 +598,87 @@ def test_load_regression_merges_synthetic_and_real(tmp_path, monkeypatch):
     assert "rg_syn_1" in ids and "rg_real_1" in ids
 
 
+def test_parse_feedback_structured_format():
+    import advisor
+    text = """## 反馈 — 2026-04-30 18:00
+
+**原对话**:
+[顾客] 丽珠兰多少钱
+[AI] 黑盒约3400
+
+**问题**:
+AI 自己编了具体数字
+
+**期望改法**:
+应该给区间或引导留资
+
+**规则修改建议**:
+项目与价格里"丽珠兰"那条强调禁具体数字
+
+---
+
+## 反馈 — 2026-04-30 19:00
+
+**问题**:
+工作时段太着急要微信
+"""
+    entries = advisor.parse_feedback_entries(text)
+    assert len(entries) == 2
+    assert entries[0]["timestamp"] == "2026-04-30 18:00"
+    assert "丽珠兰多少钱" in entries[0]["dialogue"]
+    assert "AI 自己编" in entries[0]["problem"]
+    assert "区间" in entries[0]["suggestion"]
+    assert "项目与价格" in entries[0]["rule_change"]
+    assert entries[1]["problem"].startswith("工作时段")
+    assert entries[1]["dialogue"] == ""
+
+
+def test_parse_feedback_legacy_freeform_compat():
+    """旧自由文本应作为单条 entry 解析，整段塞 problem 字段。"""
+    import advisor
+    text = "2026-04-28 客服：顾客已留微信，AI 还在反复要微信号"
+    entries = advisor.parse_feedback_entries(text)
+    assert len(entries) == 1
+    assert "反复要微信号" in entries[0]["problem"]
+    assert entries[0]["dialogue"] == ""
+    assert entries[0]["suggestion"] == ""
+
+
+def test_parse_feedback_empty():
+    import advisor
+    assert advisor.parse_feedback_entries("") == []
+    assert advisor.parse_feedback_entries("   \n  \n") == []
+
+
+def test_serialize_feedback_roundtrip():
+    """parse → serialize → parse 应保持 entry 内容稳定。"""
+    import advisor
+    original = [
+        {
+            "timestamp": "2026-04-30 18:00",
+            "dialogue":  "[顾客] x\n[AI] y",
+            "problem":   "AI 编数字",
+            "suggestion": "给区间",
+            "rule_change": "项目与价格",
+        },
+        {
+            "timestamp": "2026-04-30 19:00",
+            "dialogue":  "",
+            "problem":   "只有一句话",
+            "suggestion": "",
+            "rule_change": "",
+        },
+    ]
+    text = advisor.serialize_feedback_entries(original)
+    parsed = advisor.parse_feedback_entries(text)
+    assert len(parsed) == 2
+    assert parsed[0]["problem"] == "AI 编数字"
+    assert parsed[0]["rule_change"] == "项目与价格"
+    assert parsed[0]["dialogue"] == "[顾客] x\n[AI] y"
+    assert parsed[1]["problem"] == "只有一句话"
+    assert parsed[1]["dialogue"] == ""
+
+
 def test_run_regression_only_passes(tmp_path, monkeypatch):
     """回归测试集功能：当前 prompt 跑一遍，不修改任何文件。"""
     import advisor
