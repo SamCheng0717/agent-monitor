@@ -1,5 +1,6 @@
 import sys, json
-sys.path.insert(0, ".")
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from pathlib import Path
 
 import pytest
@@ -281,10 +282,69 @@ def test_stage_and_approve_pending(tmp_path, monkeypatch):
     assert pending_path.exists()
     assert (tmp_path / "system_prompt.md").read_text(encoding="utf-8") == "旧 prompt\n{{#context#}}\n"
 
-    info = advisor.approve_pending("v002")
+    # push_to_production=False 走纯本地路径，避免触发真实 Dify 推送
+    info = advisor.approve_pending("v002", push_to_production=False)
     assert info["version"] == "v002"
+    assert info["dify_pushed"] is False
     assert (tmp_path / "system_prompt.md").read_text(encoding="utf-8") == "新 prompt\n{{#context#}}\n"
     assert not pending_path.exists()
+
+
+def test_approve_with_dify_push_success(tmp_path, monkeypatch):
+    """approve_pending 推送成功路径：Dify push 被 mock 为返回 ok。"""
+    import advisor, sys, types
+    monkeypatch.setattr(advisor, "PROMPTS_DIR", tmp_path)
+    monkeypatch.setattr(advisor, "PENDING_DIR", tmp_path / "pending")
+    monkeypatch.setattr(advisor, "VERSIONS_DIR", tmp_path / "versions")
+    monkeypatch.setattr(advisor, "SYSTEM_PROMPT_PATH", tmp_path / "system_prompt.md")
+    monkeypatch.setattr(advisor, "CHANGELOG", tmp_path / "CHANGELOG.md")
+    (tmp_path / "system_prompt.md").write_text("旧\n{{#context#}}\n", encoding="utf-8")
+
+    fake_dify = types.ModuleType("dify_push")
+    fake_dify.push_prompt = lambda p, dry_run=False: {"ok": True, "stage": "published", "llm_node": "llm"}
+    fake_dify.DifyPushError = type("DifyPushError", (RuntimeError,), {})
+    monkeypatch.setitem(sys.modules, "dify_push", fake_dify)
+
+    advisor.stage_pending("新\n{{#context#}}\n", "v003",
+                          {"module": "x", "reason": "y", "opt_result": "1/1", "hold_result": "1/1"})
+    info = advisor.approve_pending("v003")
+    assert info["dify_pushed"] is True
+    assert (tmp_path / "system_prompt.md").read_text(encoding="utf-8") == "新\n{{#context#}}\n"
+
+
+def test_approve_rolls_back_on_dify_push_failure(tmp_path, monkeypatch):
+    """approve_pending 推送失败：本地必须回滚到推送前状态。"""
+    import advisor, sys, types
+    monkeypatch.setattr(advisor, "PROMPTS_DIR", tmp_path)
+    monkeypatch.setattr(advisor, "PENDING_DIR", tmp_path / "pending")
+    monkeypatch.setattr(advisor, "VERSIONS_DIR", tmp_path / "versions")
+    monkeypatch.setattr(advisor, "SYSTEM_PROMPT_PATH", tmp_path / "system_prompt.md")
+    monkeypatch.setattr(advisor, "CHANGELOG", tmp_path / "CHANGELOG.md")
+    (tmp_path / "versions").mkdir(parents=True)
+    (tmp_path / "system_prompt.md").write_text("初始\n{{#context#}}\n", encoding="utf-8")
+    # 先模拟之前已发布过 v001（有归档文件），这样回滚有目标
+    (tmp_path / "versions" / "v001_2026-04-28.md").write_text("初始\n{{#context#}}\n", encoding="utf-8")
+
+    # mock dify_push 抛错
+    fake_dify = types.ModuleType("dify_push")
+    class FakeErr(RuntimeError): pass
+    def boom(p, dry_run=False):
+        raise FakeErr("Dify 端 500")
+    fake_dify.push_prompt = boom
+    fake_dify.DifyPushError = FakeErr
+    monkeypatch.setitem(sys.modules, "dify_push", fake_dify)
+
+    advisor.stage_pending("新\n{{#context#}}\n", "v002",
+                          {"module": "x", "reason": "y", "opt_result": "1/1", "hold_result": "1/1"})
+
+    with pytest.raises(RuntimeError, match="Dify 推送失败已回滚"):
+        advisor.approve_pending("v002")
+
+    # 本地应该回滚到 v001 内容
+    assert (tmp_path / "system_prompt.md").read_text(encoding="utf-8") == "初始\n{{#context#}}\n"
+    # v002 归档文件应该被清理
+    v002_files = list((tmp_path / "versions").glob("v002_*.md"))
+    assert v002_files == []
 
 
 def test_version_lifecycle(tmp_path, monkeypatch):

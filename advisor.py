@@ -183,7 +183,7 @@ def _judge_behavior(reply: str, behavior: str) -> bool:
     text = (r.choices[0].message.content or "").strip()
     try:
         return bool(json.loads(text).get("ok", False))
-    except Exception:
+    except (json.JSONDecodeError, KeyError, TypeError):
         return False  # 保守策略：解析失败时拒绝，避免误放行
 
 
@@ -207,7 +207,7 @@ def _judge_violates(reply: str, rule: str, history: list[dict] | None = None) ->
     text = (r.choices[0].message.content or "").strip()
     try:
         return bool(json.loads(text).get("violates", False))
-    except Exception:
+    except (json.JSONDecodeError, KeyError, TypeError):
         return False  # 保守策略：解析失败不判违规，避免主管循环卡死
 
 
@@ -382,8 +382,11 @@ def stage_pending(candidate: str, version: str, change_info: dict) -> Path:
     return md_path
 
 
-def approve_pending(version: str) -> dict:
-    """人工审核通过 → 真正调用 publish_version 上线，清理 pending 文件。"""
+def approve_pending(version: str, push_to_production: bool = True) -> dict:
+    """人工审核通过 → 写本地 system_prompt.md → 推送到 Dify 生产 → 清理 pending。
+    push 失败自动回滚本地，保证本地与 Dify 始终一致。
+    push_to_production=False 时只写本地不推 Dify（用于离线测试）。
+    """
     md_files = sorted(PENDING_DIR.glob(f"pending_{version}_*.md"))
     if not md_files:
         raise FileNotFoundError(f"未找到待审核版本：pending_{version}_*.md")
@@ -395,11 +398,48 @@ def approve_pending(version: str) -> dict:
     candidate = md_path.read_text(encoding="utf-8")
     change_info = json.loads(meta_path.read_text(encoding="utf-8"))
 
+    # 1. 先记录回滚锚点：发布前最近一个版本
+    prev_versions = sorted(VERSIONS_DIR.glob("v*.md"))
+    rollback_anchor = prev_versions[-1].stem.split("_", 1)[0] if prev_versions else None
+
+    # 2. 写本地（含 Dify 变量校验）
     publish_version(candidate=candidate, version=version, change_info=change_info)
+
+    # 3. 推 Dify 生产
+    if push_to_production:
+        try:
+            from dify_push import push_prompt, DifyPushError
+            push_result = push_prompt(candidate, dry_run=False)
+            change_info["dify_pushed"] = True
+            change_info["dify_llm_node"] = push_result.get("llm_node", "")
+        except Exception as e:
+            # 推送失败：回滚本地到上一版本，避免本地/生产不一致
+            print(f"  ✗ Dify 推送失败：{e}")
+            print(f"  → 自动回滚本地到 {rollback_anchor or 'v000'}")
+            try:
+                if rollback_anchor:
+                    rollback_version(rollback_anchor, versions_dir=VERSIONS_DIR, target=SYSTEM_PROMPT_PATH)
+                # 把 v00X 归档文件也删掉，保持 vNNN 单调
+                today = datetime.date.today().isoformat()
+                for v_archive in VERSIONS_DIR.glob(f"{version}_*.md"):
+                    v_archive.unlink()
+            except Exception as rb_err:
+                print(f"  ⚠ 回滚也失败了：{rb_err} —— 需要人工介入恢复 system_prompt.md")
+            raise RuntimeError(f"Dify 推送失败已回滚：{e}") from e
 
     md_path.unlink()
     meta_path.unlink()
-    return {"version": version, "module": change_info.get("module", "")}
+    return {"version": version, "module": change_info.get("module", ""),
+            "dify_pushed": change_info.get("dify_pushed", False)}
+
+
+def push_current_to_dify() -> dict:
+    """把当前 system_prompt.md 一次性推到 Dify（用于补推/迁移）。"""
+    if not SYSTEM_PROMPT_PATH.exists():
+        raise FileNotFoundError(SYSTEM_PROMPT_PATH)
+    from dify_push import push_prompt
+    prompt = SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+    return push_prompt(prompt, dry_run=False)
 
 
 def rollback_version(
@@ -502,7 +542,7 @@ def generate_candidate(
         text = text.strip()
     try:
         return json.loads(text)
-    except Exception:
+    except json.JSONDecodeError:
         return {
             "module": "未知",
             "reason": "解析失败",
@@ -973,6 +1013,8 @@ def main():
                         help="只跑回归测试集对照当前 system_prompt.md，不优化")
     parser.add_argument("--status",       action="store_true",
                         help="操作员仪表盘：当前版本/用例集/pending/近 7 日数据")
+    parser.add_argument("--push-current", action="store_true",
+                        help="把当前 system_prompt.md 推到 Dify 生产（不优化）")
     args = parser.parse_args()
 
     date_str = datetime.date.today().isoformat()
@@ -982,6 +1024,16 @@ def main():
 
     if args.status:
         print_status(collect_status())
+        return
+
+    if args.push_current:
+        try:
+            r = push_current_to_dify()
+            print(f"  → 已推送到 Dify 生产，LLM 节点 = {r.get('llm_node', '')}")
+            _record_advisor_log(date_str, {"action": "dify_push", "via": "cli", **r})
+        except Exception as e:
+            print(f"  ✗ 推送失败：{e}")
+            sys.exit(2)
         return
 
     if args.test_only:

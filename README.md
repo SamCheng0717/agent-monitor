@@ -104,6 +104,7 @@ prompt 修改后，scoring 会自动适配新规则，不需要同步代码。
 
 - **Dify 变量集合校验**：候选 prompt 的 `{{#xxx#}}` 占位符必须与当前 system_prompt 完全一致，丢失或新增任何一个直接拒绝发布
 - **半监督闸门**：默认 stage_pending 写入 `prompts/pending/`，**不直接覆盖** `system_prompt.md`，必须 `--approve` 才上线
+- **Dify 自动推送**：`--approve` 同时把新 prompt 推到 Dify chatflow 的 LLM 节点并 publish；推送失败自动回滚本地，保证本地与生产一致
 - **版本管理**：v000-vNNN 全量归档到 `prompts/versions/`，CHANGELOG.md 记录每次变更的违规规则、影响、三阶段通过率
 - **一键回滚**：`python advisor.py --rollback v003`
 
@@ -175,9 +176,28 @@ python advisor.py
 # 人工审核 prompts/pending/pending_v001_*.md 后
 python advisor.py --approve v001
 
-# 出问题回滚
+# 出问题回滚（同时不会推 Dify，需要手动执行 --push-current 把旧 prompt 推回去）
 python advisor.py --rollback v001
+
+# 把当前 system_prompt.md 一次性推到 Dify（用于初始化或追平）
+python advisor.py --push-current
 ```
+
+### Dify 推送配置
+
+`--approve` 流程依赖以下 .env 字段，需要事先在 Dify 后台创建一个 admin 账号：
+
+```
+DIFY_BASE_URL=http://your-dify-host:port
+DIFY_APP_ID=<chatflow app uuid>
+DIFY_ADMIN_EMAIL=...
+DIFY_ADMIN_PASSWORD=...
+```
+
+约束：
+- 应用必须是 **chatflow / workflow** 类型（含可视化节点画布）
+- chatflow 中只能有 **唯一一个 LLM 节点**，且 `prompt_template` 中只能有 **一条 role=system** 项；多个会拒绝推送（避免误改）
+- 通过 base64 编码密码 + cookie session 调用 Dify Console API：登录 → GET workflows/draft → 改 graph → POST draft → POST publish
 
 ### Web 仪表盘（飞轮可视化）
 

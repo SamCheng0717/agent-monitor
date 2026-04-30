@@ -128,7 +128,7 @@ def fetch_conversations(since: datetime.datetime) -> list[dict]:
                 for c in f.result():
                     seen[c["id"]] = c
             except Exception:
-                pass
+                pass  # 并发批量查询中单个成员查询失败可容忍跳过
     return list(seen.values())
 
 
@@ -206,7 +206,7 @@ def detect_conversion(dialogue: str) -> bool:
     text = (r.choices[0].message.content or "").strip()
     try:
         return bool(json.loads(text).get("留资", False))
-    except Exception:
+    except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
         return "true" in text.lower()
 
 
@@ -270,7 +270,7 @@ def score_conversation(dialogue: str, system_prompt: str | None = None) -> dict:
         result.setdefault("bad_turn", "")
         result.setdefault("suggestion", "")
         return result
-    except Exception:
+    except json.JSONDecodeError:
         return {"score": 1.0, "violations": [], "problems": [], "customer_turn": "", "bad_turn": "", "suggestion": ""}
 
 

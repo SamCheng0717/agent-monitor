@@ -1,8 +1,9 @@
 import json, sys, unittest
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 from datetime import datetime, timedelta
 
-sys.path.insert(0, "E:/cs-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 class TestDifyClient(unittest.TestCase):
 

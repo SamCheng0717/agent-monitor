@@ -105,6 +105,9 @@ feedback/pending.md ← 人工反馈，发布成功后清空
 4. **失败回喂机制**：三阶段（optimize / holdout / regression）任一阶段失败，failures 都会被塞进下一轮 `generate_candidate` 让主管 LLM 修复，最多迭代 5 轮。
 5. **半监督默认值**：`run_advisor()` 默认 `auto_publish=False`，候选写到 `prompts/pending/`，**不会直接覆盖** `system_prompt.md`。必须 `--approve` 或 web 点按钮才上线。
 6. **scoring 必须传 system_prompt**：`score_conversation(dialogue, system_prompt)` 第二参数缺了会自动从 `prompts/system_prompt.md` 读，但这个文件在 .gitignore 中，新机器需要手动放。
+7. **Dify 推送的真实"上线"**：`approve_pending()` 写本地 `system_prompt.md` 之后会调 `dify_push.push_prompt()` 把内容推到 Dify chatflow 的 LLM 节点并 publish。**不推 Dify 等于没真正上线**，生产 AI 仍在跑旧 prompt。推送失败时会自动回滚本地，保证本地与 Dify 始终一致。
+8. **Dify 登录"加密"是 base64**：源码 `libs/encryption.py` 自承"not cryptographic encryption"。客户端 base64 编码密码后 POST，服务端 decode。Token 走 cookie，不在 body。
+9. **Dify chatflow 限制**：自动推送要求该应用是 chatflow（workflow）+ 仅有一个 LLM 节点 + 该节点 `prompt_template` 仅有一条 `role=system`。多个则拒绝推送，避免误改。要支持复杂场景需扩展 `dify_push._patch_graph`。
 
 ### CLI 速查
 
@@ -114,11 +117,13 @@ python advisor.py                      # 完整飞轮一轮
 python advisor.py --status             # 操作员仪表盘（CLI 版）
 python advisor.py --test-only          # 仅跑回归集对照当前 prompt
 python advisor.py --extract-only       # 仅从日报抽用例不优化
-python advisor.py --approve v00X       # 人工审批 pending → 上线
-python advisor.py --rollback v00X      # 回滚到指定版本
+python advisor.py --approve v00X       # 人工审批 pending → 写本地 + 推 Dify 上线
+python advisor.py --rollback v00X      # 回滚到指定版本（仅本地，需配 --push-current 推回 Dify）
+python advisor.py --push-current       # 把当前 system_prompt.md 推送到 Dify chatflow
 python advisor.py --auto-publish       # 跳过人工审核（仅全自动场景）
 python web/app.py                      # 启动 web 仪表盘（默认 8080）
-python -m pytest tests/ -v             # 跑 40 条单元测试
+python dify_push.py --dry-run          # 调试 Dify 推送：保存 draft 不 publish
+python -m pytest tests/ -v             # 跑 42 条单元测试
 ```
 
 ### Web 仪表盘端点（web/app.py）
