@@ -25,8 +25,10 @@ VERSIONS_DIR       = PROMPTS_DIR / "versions"
 PENDING_DIR        = PROMPTS_DIR / "pending"
 CHANGELOG          = PROMPTS_DIR / "CHANGELOG.md"
 SYSTEM_PROMPT_PATH = PROMPTS_DIR / "system_prompt.md"
-CASES_PATH         = Path("tests/cases.json")
-REGRESSION_PATH    = Path("tests/regression_set.json")
+CASES_PATH                = Path("tests/cases.json")
+REGRESSION_PATH           = Path("tests/regression_set.json")
+REGRESSION_REAL_PATH      = Path("tests/regression_set_real.json")
+REGRESSION_CANDIDATES_PATH = Path("tests/regression_candidates.md")
 FEEDBACK_PATH      = Path("feedback/pending.md")
 REPORTS_DIR        = Path("reports")
 ADVISOR_LOG_DIR    = REPORTS_DIR / "advisor"
@@ -569,22 +571,22 @@ def _load_cases() -> tuple[list[dict], list[dict]]:
     return optimize, holdout
 
 
-def _load_regression_cases() -> tuple[list[dict], float]:
-    """读取人工维护的稳定回归测试集，返回 (cases, publish_threshold)。"""
-    if not REGRESSION_PATH.exists():
-        return [], 0.95
+def _read_regression_file(path: Path, universal_default: list[str]) -> tuple[list[dict], float, list[str]]:
+    """读单个 regression 文件，返回 (cases, threshold, universal_blacklist)。"""
+    if not path.exists():
+        return [], 0.95, universal_default
     try:
-        data = json.loads(REGRESSION_PATH.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
-        return [], 0.95
+        return [], 0.95, universal_default
 
-    universal_blacklist = data.get("universal_must_not_contain", []) or []
+    universal = data.get("universal_must_not_contain", universal_default) or universal_default
     threshold = data.get("_meta", {}).get("publish_threshold", 0.95)
 
     cases = []
     for c in data.get("cases", []):
-        per_case_blacklist = c.get("must_not_contain") or []
-        merged = list({*universal_blacklist, *per_case_blacklist})
+        per_case = c.get("must_not_contain") or []
+        merged = list({*universal, *per_case})
 
         case = {
             "id":                    c["id"],
@@ -602,7 +604,211 @@ def _load_regression_cases() -> tuple[list[dict], float]:
                 case["customer_input"] = m["content"]
                 break
         cases.append(case)
-    return cases, threshold
+    return cases, threshold, universal
+
+
+def _load_regression_cases() -> tuple[list[dict], float]:
+    """合并人工维护的合成 regression_set 与真实挖掘的 regression_set_real。
+    阈值取较严的（最大值）。
+    """
+    syn_cases, syn_thr, universal = _read_regression_file(REGRESSION_PATH, [])
+    real_cases, real_thr, _ = _read_regression_file(REGRESSION_REAL_PATH, universal)
+    threshold = max(syn_thr, real_thr) if (syn_cases or real_cases) else 0.95
+    seen = set()
+    merged = []
+    for c in [*syn_cases, *real_cases]:
+        if c["id"] in seen:
+            continue
+        seen.add(c["id"])
+        merged.append(c)
+    return merged, threshold
+
+
+def _gather_real_violations(top_per_rule: int = 5) -> list[dict]:
+    """扫 reports/<date>.json，按 violations[].rule 聚类，返回每条规则下分数最低的 Top N 候选。
+    每个候选对象含完整对话、违规证据、来源元数据。"""
+    if not REPORTS_DIR.exists():
+        return []
+    by_rule: dict[str, list[dict]] = {}
+    for p in sorted(REPORTS_DIR.glob("????-??-??.json")):
+        try:
+            payload = json.loads(p.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        date_str = payload.get("date", p.stem)
+        for record in payload.get("bad_conversations", []):
+            for v in record.get("violations", []):
+                rule = (v.get("rule") or "").strip()
+                if not rule:
+                    continue
+                by_rule.setdefault(rule, []).append({
+                    "rule":       rule,
+                    "evidence":   v.get("evidence", ""),
+                    "impact":     v.get("impact", ""),
+                    "score":      record.get("score", 1.0),
+                    "conv_id":    record.get("conv_id", ""),
+                    "user_id":    record.get("user_id", ""),
+                    "date":       date_str,
+                    "messages":   record.get("messages", []),
+                    "suggestion": record.get("suggestion", ""),
+                    "customer_turn": record.get("customer_turn", ""),
+                    "bad_turn":   record.get("bad_turn", ""),
+                })
+    # 排序：分数低的优先（违规越严重）
+    out = []
+    for rule, items in by_rule.items():
+        items.sort(key=lambda x: x.get("score", 1.0))
+        out.append({"rule": rule, "candidates": items[:top_per_rule], "total": len(items)})
+    out.sort(key=lambda r: -r["total"])
+    return out
+
+
+def _read_existing_real_sources() -> set[str]:
+    """已晋升的真实 case 来源标识（避免重复挖掘相同对话）。"""
+    if not REGRESSION_REAL_PATH.exists():
+        return set()
+    try:
+        data = json.loads(REGRESSION_REAL_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return set()
+    return {c.get("source", "") for c in data.get("cases", []) if c.get("source")}
+
+
+def mine_regression_candidates(top_per_rule: int = 5) -> Path:
+    """扫历史日报输出 regression_candidates.md，含 [ ] 复选框给人工勾选。"""
+    grouped = _gather_real_violations(top_per_rule=top_per_rule)
+    seen = _read_existing_real_sources()
+
+    lines: list[str] = [
+        f"# 回归测试集候选 — {datetime.date.today().isoformat()}",
+        "",
+        "> 把要晋升的候选 `[ ]` 改为 `[x]`，保存后执行：",
+        "> `python advisor.py --promote-regression`",
+        "",
+        f"扫描 {len(grouped)} 类违规，{sum(g['total'] for g in grouped)} 条历史违规，",
+        f"已挑选 Top {top_per_rule}/类作候选（按分数升序，越严重越靠前）。",
+        f"已晋升过的来源 {len(seen)} 条会被跳过。",
+        "",
+        "---",
+        "",
+    ]
+    cnt = 0
+    for grp in grouped:
+        rule = grp["rule"]
+        lines.append(f"## {rule}（共 {grp['total']} 条历史命中）")
+        lines.append("")
+        for c in grp["candidates"]:
+            source = f"{c['date']}_{c['conv_id']}"
+            if source in seen:
+                continue
+            cnt += 1
+            lines.append(f"### [ ] 候选 {cnt}: `{source}`  得分 {c['score']:.2f}  用户 `{c['user_id']}`")
+            lines.append("")
+            lines.append("**对话历史**：")
+            lines.append("```")
+            for m in c["messages"][-10:]:
+                role = "顾客" if m.get("role") == "user" else "AI"
+                content = (m.get("content") or "").replace("\n", " ")[:200]
+                lines.append(f"[{role}] {content}")
+            lines.append("```")
+            lines.append("")
+            lines.append(f"**违规证据**：{c['evidence']}")
+            lines.append(f"**留资影响**：{c['impact']}")
+            lines.append(f"**触发顾客原话**：{c['customer_turn']}")
+            lines.append(f"**违规 AI 原话**：{c['bad_turn']}")
+            lines.append(f"**建议回法**：{c['suggestion']}")
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+
+    REGRESSION_CANDIDATES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    REGRESSION_CANDIDATES_PATH.write_text("\n".join(lines), encoding="utf-8")
+    return REGRESSION_CANDIDATES_PATH
+
+
+_PROMOTE_HEADER_RE = re.compile(
+    r"### \[x\] 候选 \d+: `(?P<source>[^`]+)`\s+得分 (?P<score>[\d.]+)\s+用户 `(?P<user>[^`]*)`"
+)
+
+
+def promote_regression() -> tuple[int, Path]:
+    """读 regression_candidates.md 中已勾选的候选，写入 regression_set_real.json。
+    返回 (新增条数, 文件路径)。
+    """
+    if not REGRESSION_CANDIDATES_PATH.exists():
+        raise FileNotFoundError(f"先跑 --mine-regression 生成 {REGRESSION_CANDIDATES_PATH}")
+
+    text = REGRESSION_CANDIDATES_PATH.read_text(encoding="utf-8")
+    grouped = _gather_real_violations(top_per_rule=999)
+    by_source: dict[str, dict] = {}
+    for grp in grouped:
+        for c in grp["candidates"]:
+            by_source[f"{c['date']}_{c['conv_id']}"] = c
+
+    # 找 [x] 的 source
+    selected_sources = []
+    current_rule = None
+    for line in text.split("\n"):
+        if line.startswith("## "):
+            current_rule = line[3:].split("（")[0].strip()
+        m = _PROMOTE_HEADER_RE.match(line)
+        if m:
+            selected_sources.append((m.group("source"), current_rule))
+
+    if not selected_sources:
+        return 0, REGRESSION_REAL_PATH
+
+    # 加载已有
+    if REGRESSION_REAL_PATH.exists():
+        existing = json.loads(REGRESSION_REAL_PATH.read_text(encoding="utf-8"))
+    else:
+        # 沿用合成集的 universal_must_not_contain
+        syn_universal = []
+        if REGRESSION_PATH.exists():
+            try:
+                syn_data = json.loads(REGRESSION_PATH.read_text(encoding="utf-8"))
+                syn_universal = syn_data.get("universal_must_not_contain", [])
+            except (json.JSONDecodeError, OSError):
+                pass
+        existing = {
+            "_meta": {
+                "purpose": "从真实生产对话挖掘的稳定回归集（人工筛过）",
+                "publish_threshold": 0.95,
+                "last_updated": datetime.date.today().isoformat(),
+            },
+            "universal_must_not_contain": syn_universal,
+            "cases": [],
+        }
+
+    seen_sources = {c.get("source", "") for c in existing["cases"]}
+    added = 0
+    for source, rule in selected_sources:
+        if source in seen_sources:
+            continue
+        cand = by_source.get(source)
+        if not cand:
+            continue
+        case = {
+            "id":                     f"rg_real_{source.replace('-', '').replace('_', '_')[:24]}",
+            "category":               "real-mined",
+            "source":                 source,
+            "description":            f"挖自 {source}：{rule[:40]}",
+            "dialogue_messages":      cand["messages"][-30:],
+            "must_not_contain":       [],
+            "must_not_violate_rules": [rule] if rule else [],
+            "expected_behavior":      cand.get("suggestion", ""),
+        }
+        existing["cases"].append(case)
+        seen_sources.add(source)
+        added += 1
+
+    existing["_meta"]["last_updated"] = datetime.date.today().isoformat()
+
+    REGRESSION_REAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    REGRESSION_REAL_PATH.write_text(
+        json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return added, REGRESSION_REAL_PATH
 
 
 def _record_advisor_log(date: str, payload: dict) -> Path:
@@ -1015,6 +1221,12 @@ def main():
                         help="操作员仪表盘：当前版本/用例集/pending/近 7 日数据")
     parser.add_argument("--push-current", action="store_true",
                         help="把当前 system_prompt.md 推到 Dify 生产（不优化）")
+    parser.add_argument("--mine-regression", action="store_true",
+                        help="扫历史 reports 按违规聚类，输出 regression_candidates.md 待人工勾选")
+    parser.add_argument("--promote-regression", action="store_true",
+                        help="读 regression_candidates.md 中 [x] 的候选，写入 regression_set_real.json")
+    parser.add_argument("--top-per-rule", type=int, default=5,
+                        help="每条规则导出多少候选（默认 5）")
     args = parser.parse_args()
 
     date_str = datetime.date.today().isoformat()
@@ -1024,6 +1236,22 @@ def main():
 
     if args.status:
         print_status(collect_status())
+        return
+
+    if args.mine_regression:
+        path = mine_regression_candidates(top_per_rule=args.top_per_rule)
+        print(f"  → 候选已写入 {path}")
+        print(f"  → 编辑该文件，把要晋升的 [ ] 改为 [x]，然后跑：")
+        print(f"      python advisor.py --promote-regression")
+        return
+
+    if args.promote_regression:
+        try:
+            added, path = promote_regression()
+        except FileNotFoundError as e:
+            print(f"  ✗ {e}")
+            return
+        print(f"  → 已晋升 {added} 条到 {path}")
         return
 
     if args.push_current:

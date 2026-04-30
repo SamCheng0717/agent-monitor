@@ -480,6 +480,124 @@ def test_record_advisor_log_appends_per_day(tmp_path, monkeypatch):
     assert history[1]["version"] == "v003"
 
 
+def test_mine_regression_groups_by_rule_and_skips_promoted(tmp_path, monkeypatch):
+    import advisor
+    monkeypatch.setattr(advisor, "REPORTS_DIR", tmp_path / "reports")
+    monkeypatch.setattr(advisor, "REGRESSION_REAL_PATH", tmp_path / "real.json")
+    monkeypatch.setattr(advisor, "REGRESSION_CANDIDATES_PATH", tmp_path / "candidates.md")
+    (tmp_path / "reports").mkdir()
+
+    # 两份日报，三条违规：rule_A 出现两次，rule_B 一次
+    (tmp_path / "reports" / "2026-04-28.json").write_text(json.dumps({
+        "date": "2026-04-28",
+        "bad_conversations": [
+            {"conv_id": "c1", "user_id": "u1", "score": 0.2,
+             "violations": [{"rule": "rule_A", "evidence": "e1", "impact": "i1"}],
+             "messages": [{"role": "user", "content": "hi"}],
+             "customer_turn": "hi", "bad_turn": "wrong reply", "suggestion": "fix"},
+            {"conv_id": "c2", "user_id": "u2", "score": 0.4,
+             "violations": [{"rule": "rule_B", "evidence": "e2", "impact": "i2"}],
+             "messages": [{"role": "user", "content": "hello"}],
+             "customer_turn": "hello", "bad_turn": "x", "suggestion": "y"},
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "reports" / "2026-04-29.json").write_text(json.dumps({
+        "date": "2026-04-29",
+        "bad_conversations": [
+            {"conv_id": "c3", "user_id": "u3", "score": 0.1,
+             "violations": [{"rule": "rule_A", "evidence": "e3", "impact": "i3"}],
+             "messages": [{"role": "user", "content": "hey"}],
+             "customer_turn": "hey", "bad_turn": "z", "suggestion": "w"},
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    # 已晋升过 c1 这条，挖掘时应跳过
+    (tmp_path / "real.json").write_text(json.dumps({
+        "_meta": {}, "universal_must_not_contain": [],
+        "cases": [{"id": "rg_real_x", "source": "2026-04-28_c1"}],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    path = advisor.mine_regression_candidates(top_per_rule=5)
+    md = path.read_text(encoding="utf-8")
+
+    # rule_A 应出现，c3 在 c1 前（score 升序）
+    assert "rule_A" in md
+    assert "rule_B" in md
+    # c1 已晋升，不该再次出现
+    assert "2026-04-28_c1" not in md
+    # c3 / c2 应出现
+    assert "2026-04-29_c3" in md
+    assert "2026-04-28_c2" in md
+
+
+def test_promote_regression_appends_only_checked(tmp_path, monkeypatch):
+    import advisor
+    monkeypatch.setattr(advisor, "REPORTS_DIR", tmp_path / "reports")
+    monkeypatch.setattr(advisor, "REGRESSION_PATH", tmp_path / "syn.json")
+    monkeypatch.setattr(advisor, "REGRESSION_REAL_PATH", tmp_path / "real.json")
+    monkeypatch.setattr(advisor, "REGRESSION_CANDIDATES_PATH", tmp_path / "candidates.md")
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "syn.json").write_text(json.dumps({
+        "_meta": {}, "universal_must_not_contain": ["我们"],
+        "cases": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "reports" / "2026-04-28.json").write_text(json.dumps({
+        "date": "2026-04-28",
+        "bad_conversations": [
+            {"conv_id": "abc", "user_id": "u", "score": 0.3,
+             "violations": [{"rule": "禁止重复索要微信", "evidence": "e", "impact": "i"}],
+             "messages": [{"role": "user", "content": "丽珠兰多少钱"}],
+             "customer_turn": "丽珠兰多少钱", "bad_turn": "约3400", "suggestion": "引导留微信"},
+            {"conv_id": "def", "user_id": "u", "score": 0.4,
+             "violations": [{"rule": "禁止编造价格", "evidence": "e2", "impact": "i2"}],
+             "messages": [{"role": "user", "content": "热玛吉多少钱"}],
+             "customer_turn": "热玛吉多少钱", "bad_turn": "x", "suggestion": "y"},
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    advisor.mine_regression_candidates(top_per_rule=5)
+
+    # 模拟人工只勾第一条（abc）
+    md = (tmp_path / "candidates.md").read_text(encoding="utf-8")
+    md_modified = md.replace("[ ] 候选 1: `2026-04-28_abc`", "[x] 候选 1: `2026-04-28_abc`", 1)
+    (tmp_path / "candidates.md").write_text(md_modified, encoding="utf-8")
+
+    added, _ = advisor.promote_regression()
+    assert added == 1
+
+    real = json.loads((tmp_path / "real.json").read_text(encoding="utf-8"))
+    assert len(real["cases"]) == 1
+    case = real["cases"][0]
+    assert case["source"] == "2026-04-28_abc"
+    assert "禁止重复索要微信" in case["must_not_violate_rules"]
+    assert case["dialogue_messages"][-1]["content"] == "丽珠兰多少钱"
+    # universal 黑名单从合成集继承
+    assert "我们" in real["universal_must_not_contain"]
+
+
+def test_load_regression_merges_synthetic_and_real(tmp_path, monkeypatch):
+    import advisor
+    monkeypatch.setattr(advisor, "REGRESSION_PATH", tmp_path / "syn.json")
+    monkeypatch.setattr(advisor, "REGRESSION_REAL_PATH", tmp_path / "real.json")
+    (tmp_path / "syn.json").write_text(json.dumps({
+        "_meta": {"publish_threshold": 0.9},
+        "universal_must_not_contain": ["我们"],
+        "cases": [{"id": "rg_syn_1",
+                   "dialogue_messages": [{"role": "user", "content": "x"}]}],
+    }, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "real.json").write_text(json.dumps({
+        "_meta": {"publish_threshold": 0.95},
+        "cases": [{"id": "rg_real_1",
+                   "dialogue_messages": [{"role": "user", "content": "y"}]}],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    cases, threshold = advisor._load_regression_cases()
+    assert len(cases) == 2
+    assert threshold == 0.95  # 取较严的
+    ids = [c["id"] for c in cases]
+    assert "rg_syn_1" in ids and "rg_real_1" in ids
+
+
 def test_run_regression_only_passes(tmp_path, monkeypatch):
     """回归测试集功能：当前 prompt 跑一遍，不修改任何文件。"""
     import advisor
