@@ -130,11 +130,17 @@
       </h1>
       <p class="text-slate-400 text-sm mt-1">AI + 人工半监督 · 每日演进</p>
     </div>
-    <div class="text-right">
-      <div class="text-2xl font-mono" id="header-date">—</div>
-      <div class="text-xs text-slate-400 flex items-center justify-end gap-2 mt-1">
-        <span class="live-dot inline-block w-2 h-2 rounded-full bg-emerald-400"></span>
-        <span id="last-refresh">—</span>
+    <div class="flex items-start gap-4">
+      <button onclick="openHelp()" title="使用说明"
+              class="px-3 py-2 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800 hover:text-white text-sm">
+        ❓ 使用说明
+      </button>
+      <div class="text-right">
+        <div class="text-2xl font-mono" id="header-date">—</div>
+        <div class="text-xs text-slate-400 flex items-center justify-end gap-2 mt-1">
+          <span class="live-dot inline-block w-2 h-2 rounded-full bg-emerald-400"></span>
+          <span id="last-refresh">—</span>
+        </div>
       </div>
     </div>
   </header>
@@ -326,6 +332,156 @@
   <footer class="text-center text-xs text-slate-600 py-6">
     agent-monitor · github.com/SamCheng0717/agent-monitor
   </footer>
+</div>
+
+<!-- 使用说明弹窗 -->
+<div id="help-modal" class="hidden fixed inset-0 bg-black/80 backdrop-blur-sm z-50 p-4 overflow-auto">
+  <div class="max-w-4xl mx-auto glass p-6 mt-8 space-y-6">
+    <div class="flex items-center justify-between">
+      <h2 class="text-2xl font-bold">agent-monitor 使用说明</h2>
+      <button onclick="closeHelp()" class="text-slate-400 hover:text-white text-2xl leading-none">&times;</button>
+    </div>
+
+    <!-- 这是什么 -->
+    <section>
+      <h3 class="text-lg font-semibold text-cyan-300 mb-2">这是什么？</h3>
+      <p class="text-sm text-slate-300 leading-relaxed">
+        AI + 人工半监督的客服质量监控与提示词演进飞轮。每天凌晨 cron 自动跑：
+        从 Dify 拉所有对话 → 找违规 → 主管 LLM 优化 prompt → 三阶段测试 → 通过则生成 pending 候选 → 等你审批 → 推到 Dify 生产。
+        <strong>你只需要每天 5 分钟点几下网页。</strong>
+      </p>
+    </section>
+
+    <!-- 每日操作 -->
+    <section>
+      <h3 class="text-lg font-semibold text-emerald-300 mb-2">📅 每日操作（5 分钟）</h3>
+      <ol class="text-sm text-slate-300 space-y-2 list-decimal ml-5">
+        <li>打开 <code class="bg-slate-800 px-1.5 py-0.5 rounded text-cyan-300">192.168.103.66:8090</code></li>
+        <li>看顶部 4 张 KPI 卡：
+          <ul class="list-disc ml-5 mt-1 text-slate-400 space-y-0.5">
+            <li><strong>留资率</strong>带涨跌箭头：↑ 表示昨天比前天好</li>
+            <li><strong>待审候选</strong>显示数字 = advisor 凌晨生成了新 prompt 等你审</li>
+          </ul>
+        </li>
+        <li>看「待审候选」区，如有：
+          <ul class="list-disc ml-5 mt-1 text-slate-400 space-y-0.5">
+            <li>点 <strong>"查看 diff"</strong> → 弹窗显示新 prompt vs 当前的差异</li>
+            <li>看顶部 4 个字段：改了哪个模块、违反什么规则、对留资影响、三阶段通过率</li>
+            <li>合理就点 <strong>"批准并发布"</strong>（自动写本地 + 推 Dify 生产）</li>
+            <li>不合理点 <strong>"驳回"</strong>（删 pending，明天 advisor 重新尝试）</li>
+          </ul>
+        </li>
+        <li>「人工反馈」框里写下今天观察到的客服群问题（看到顾客抱怨、客服吐槽都可以记），下次 advisor 自动读</li>
+        <li>关浏览器</li>
+      </ol>
+    </section>
+
+    <!-- 周期性 -->
+    <section>
+      <h3 class="text-lg font-semibold text-amber-300 mb-2">🔄 每周一次（10 分钟）</h3>
+      <ol class="text-sm text-slate-300 space-y-2 list-decimal ml-5">
+        <li>滚到「回归测试集挖掘」区</li>
+        <li>点 <strong>"扫历史 reports"</strong>，按违规规则分组列出真实候选对话</li>
+        <li>每组挑 1-2 条最典型的，勾上 ☑️</li>
+        <li>点 <strong>"晋升选中"</strong> → 写入真实回归集</li>
+        <li><strong>意义</strong>：让稳定性测试越来越接近真实生产场景，不靠手写脑补</li>
+      </ol>
+    </section>
+
+    <!-- 应急 -->
+    <section>
+      <h3 class="text-lg font-semibold text-red-300 mb-2">🚨 出问题时</h3>
+      <table class="text-sm text-slate-300 w-full">
+        <thead class="text-xs text-slate-500 border-b border-slate-700">
+          <tr><th class="text-left py-2 pr-4">症状</th><th class="text-left py-2">怎么处理</th></tr>
+        </thead>
+        <tbody class="space-y-2">
+          <tr class="border-b border-slate-800/50">
+            <td class="py-2 pr-4 align-top">新版本上线后 AI 答得很糟</td>
+            <td class="py-2">版本时间线点上一个圆点 → "回滚 + 同步推 Dify"</td>
+          </tr>
+          <tr class="border-b border-slate-800/50">
+            <td class="py-2 pr-4 align-top">怀疑本地 prompt 和 Dify 不一致</td>
+            <td class="py-2">点最新版本圆点 → "回滚 + 同步推 Dify"（强制对齐）</td>
+          </tr>
+          <tr class="border-b border-slate-800/50">
+            <td class="py-2 pr-4 align-top">改完合成回归集想立刻验证</td>
+            <td class="py-2">"测试集状态"卡片右上角 → "立即跑回归"（30 秒）</td>
+          </tr>
+          <tr class="border-b border-slate-800/50">
+            <td class="py-2 pr-4 align-top">想看某天为什么留资掉</td>
+            <td class="py-2">折线图点该天的点 → 弹窗看完整劣质对话清单</td>
+          </tr>
+          <tr class="border-b border-slate-800/50">
+            <td class="py-2 pr-4 align-top">advisor 连续几天 failed</td>
+            <td class="py-2">看 "近 7 日 advisor 行动" 表，多半是某条规则总改不好。在反馈框里写人工建议</td>
+          </tr>
+          <tr>
+            <td class="py-2 pr-4 align-top">仪表盘打不开</td>
+            <td class="py-2">SSH：<code class="bg-slate-800 px-1 rounded">pkill -f uvicorn && cd /www/wwwroot/agent-monitor && nohup venv/bin/uvicorn web.app:app --host 0.0.0.0 --port 8090 &amp;</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- 名词解释 -->
+    <section>
+      <h3 class="text-lg font-semibold text-purple-300 mb-2">📖 名词解释</h3>
+      <dl class="text-sm text-slate-300 space-y-2">
+        <div><dt class="font-mono text-cyan-300 inline">飞轮</dt><dd class="inline ml-2">每天循环：监控 → 发现违规 → 优化 → 测试 → 审批 → 上线 → 次日验证</dd></div>
+        <div><dt class="font-mono text-cyan-300 inline">pending</dt><dd class="inline ml-2">advisor 生成的候选 prompt，写在 prompts/pending/，等你点"批准"才上 Dify</dd></div>
+        <div><dt class="font-mono text-cyan-300 inline">optimize 集</dt><dd class="inline ml-2">从生产失败自动累积，<strong>驱动每天迭代</strong>。candidate 必须 100% 通过</dd></div>
+        <div><dt class="font-mono text-cyan-300 inline">holdout 集</dt><dd class="inline ml-2">cases.json 随机分出的 20%，<strong>防过拟合</strong>。candidate 要 ≥ 75% 通过</dd></div>
+        <div><dt class="font-mono text-cyan-300 inline">regression 集</dt><dd class="inline ml-2">人工维护的稳定测试，<strong>守稳定性底线</strong>。candidate 要 ≥ 95% 通过才能进 pending</dd></div>
+        <div><dt class="font-mono text-cyan-300 inline">三阶段闸门</dt><dd class="inline ml-2">candidate 必须依次过 optimize / holdout / regression，任一阶段失败就把失败 case 喂回主管 LLM 重试，最多 5 轮</dd></div>
+        <div><dt class="font-mono text-cyan-300 inline">违规</dt><dd class="inline ml-2">AI 回复违反 system_prompt.md 的某条具体规则。每条违规含 rule / evidence / impact 三段</dd></div>
+        <div><dt class="font-mono text-cyan-300 inline">留资</dt><dd class="inline ml-2">顾客留下了微信号或手机号 — <strong>唯一核心 KPI</strong></dd></div>
+      </dl>
+    </section>
+
+    <!-- 飞轮架构 -->
+    <section>
+      <h3 class="text-lg font-semibold text-cyan-300 mb-2">🔁 飞轮架构</h3>
+      <pre class="text-xs text-slate-300 bg-slate-950/60 rounded p-4 overflow-auto">
+[02:00 cron]   monitor.py     拉 Dify 全部对话 + 留资识别 + 违规检测
+                              ↓
+                              reports/&lt;date&gt;.json
+                              ↓
+[02:30 cron]   advisor.py     提取测试用例 → 主管 LLM 迭代 → 三阶段闸门
+                              ↓
+                              prompts/pending/pending_v00X_&lt;date&gt;.md
+                              ↓
+                              钉钉通知 "候选 v00X 待审核"
+                              ↓
+[人工 5 分钟]                   网页 diff 审核
+                              ↓
+                              批准 → 写本地 + 推 Dify publish
+                              ↓
+                              生产 chatflow 应用立即生效
+                              ↓
+[次日]                          monitor 验证修复 / 发现新失败
+                              ↻ 循环</pre>
+    </section>
+
+    <!-- 文件 -->
+    <section>
+      <h3 class="text-lg font-semibold text-slate-300 mb-2">📂 关键文件位置（仅 SSH 用）</h3>
+      <div class="text-sm text-slate-400 font-mono space-y-1">
+        <div>/www/wwwroot/agent-monitor/prompts/system_prompt.md  — 当前生效</div>
+        <div>/www/wwwroot/agent-monitor/prompts/versions/         — 历史归档</div>
+        <div>/www/wwwroot/agent-monitor/prompts/pending/          — 待审候选</div>
+        <div>/www/wwwroot/agent-monitor/reports/&lt;date&gt;.json     — 每日数据</div>
+        <div>/www/wwwroot/agent-monitor/tests/cases.json          — 自动训练集</div>
+        <div>/www/wwwroot/agent-monitor/tests/regression_set*.json — 回归测试集</div>
+        <div>/www/wwwroot/agent-monitor/feedback/pending.md        — 人工反馈</div>
+        <div>/www/wwwroot/agent-monitor/logs/                      — cron 输出日志</div>
+      </div>
+    </section>
+
+    <div class="flex justify-end pt-2">
+      <button onclick="closeHelp()" class="px-4 py-2 rounded-lg bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/30">知道了</button>
+    </div>
+  </div>
 </div>
 
 <!-- 版本详情弹窗 -->
@@ -900,6 +1056,10 @@ async function promoteSelected() {
   await loadMineCandidates();
   await loadAll();  // 刷新主仪表盘 KPI / 测试集计数
 }
+
+// ── 使用说明弹窗 ──────────────────────────────────────────────
+function openHelp()  { document.getElementById("help-modal").classList.remove("hidden"); }
+function closeHelp() { document.getElementById("help-modal").classList.add("hidden"); }
 
 // ── 反馈输入 ────────────────────────────────────────────────────
 async function loadFeedback() {
